@@ -1,0 +1,60 @@
+# Local environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Application local data (never commit)
+.ql/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+cache/
+models/
+artifacts/
+reports/
+logs/
+imports/
+backups/
+
+# Secrets (unused by design; ignore if created accidentally)
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Cursor local (keep shared rules if added later; ignore machine settings noise)
+.cursor/projects/
+
+# Model / ML downloads
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+
+# Notebooks checkpoints
+.ipynb_checkpoints/

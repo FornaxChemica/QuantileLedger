@@ -1,0 +1,97 @@
+[project]
+name = "quantile-ledger"
+version = "0.1.0"
+description = "A point-in-time ledger for probabilistic forecasts, calibration, and paper trades."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11,<3.13"
+authors = [{ name = "FornaxChemica" }]
+keywords = [
+  "forecasting",
+  "calibration",
+  "quantiles",
+  "paper-trading",
+  "walk-forward",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+  "typer>=0.15.0",
+  "rich>=13.9.0",
+  "pydantic>=2.10.0",
+  "pydantic-settings>=2.7.0",
+]
+
+[project.optional-dependencies]
+ml = [
+  # Declared in later milestones (FinBERT / TFT). Kept empty in M0.
+]
+dashboard = [
+  # Declared in Milestone 8 (Streamlit / Plotly). Kept empty in M0.
+]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.9.0",
+  "mypy>=1.14.0",
+]
+
+[project.scripts]
+ql = "quantile_ledger.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantile_ledger"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/quantile_ledger/schema.sql" = "quantile_ledger/schema.sql"
+
+[tool.uv]
+default-groups = ["dev"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.9.0",
+  "mypy>=1.14.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "B",
+  "UP",
+  "SIM",
+  "RUF",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["quantile_ledger"]
+mypy_path = "src"
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = ["-q"]
