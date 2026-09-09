@@ -119,10 +119,43 @@ M0 = ExperimentSpec(
     label="exploratory",
 )
 
+K0 = ExperimentSpec(
+    experiment_id="K0",
+    name="kronos_sample_quantile_market_only",
+    version="1",
+    model_family="kronos",
+    feature_set=FEATURE_SET_MARKET_ONLY,
+    feature_version=FEATURE_VERSION_V1,
+    target_definition=TARGET_LOG_RETURN,
+    status="candidate",
+    purpose=(
+        "Kronos foundation-model sample paths mapped to empirical return "
+        "quantiles (market-only OHLC). Fake sampler for offline demo; real "
+        "weights optional and gated. Sample-quantile approx, not a retained "
+        "full predictive density."
+    ),
+    quantiles=DEFAULT_QUANTILES,
+    horizons_hours=DEFAULT_HORIZONS,
+    hyperparameters={
+        "lookback": 64,
+        "sample_count": 32,
+        "temperature": 1.0,
+        "top_p": 0.9,
+        "model_id": "NeoQuasar/Kronos-small",
+        "tokenizer_id": "NeoQuasar/Kronos-Tokenizer-base",
+        "backbone": "kronos_or_fake_sampler",
+        "quantile_method": "empirical_samples_v1",
+        "distribution_claim": "sample_quantile_approx",
+        "upstream_license": "MIT",
+    },
+    label="exploratory",
+)
+
 REGISTRY: dict[str, ExperimentSpec] = {
     B0.experiment_id: B0,
     B1.experiment_id: B1,
     M0.experiment_id: M0,
+    K0.experiment_id: K0,
 }
 
 

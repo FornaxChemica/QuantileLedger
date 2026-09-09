@@ -37,9 +37,17 @@ Living checklist. Update status after each verified phase.
 - [x] `ql doctor` optional-extra status (no private paths)
 - [x] Schema v3 migration tests
 
+## Phase D — Kronos K0
+
+- [x] Official API/license note (MIT; sample paths via `KronosPredictor`)
+- [x] `K0` experiment registry + sample→quantile contract metadata
+- [x] Fake adapter for offline demo/tests; real backend with local cache
+- [x] Optional `[ml]` extra (torch/pandas/…) — approved
+- [x] `ql experiment fetch-k0` one-time public Hub download into `.ql/`
+- [x] Paired compare / calibration include K0 vs B1/M0
+- [x] `ql experiment audit-k0`
 ## Later (not started)
 
-- Phase D Kronos K0 (optional deps; ask before adding)
 - Phase E TFT T0
 - Phase F FinBERT / news
 - Phase G ablations

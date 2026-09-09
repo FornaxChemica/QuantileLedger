@@ -41,7 +41,8 @@ A **local-first** research tool for US equities/ETFs that:
 | B0 | Persistence (P50 log-return = 0) | Market only | Implemented |
 | B1 | Rolling empirical return quantiles | Market only | Implemented |
 | M0 | MambaQuantile (local selective SSM) | Market only | Implemented (candidate) |
-| K0 / T0+ / news / E0 | Kronos, TFT, FinBERT, ensemble | — | Not implemented |
+| K0 | Kronos sample → empirical quantiles | Market only | Implemented (fake in demo; real via `[ml]` + `fetch-k0`) |
+| T0+ / news / E0 | TFT, FinBERT, ensemble | — | Not implemented |
 
 Target convention: cumulative **log return** `r = log(P_target / P_issue)`,
 with price quantiles `P * exp(r)`.
@@ -57,9 +58,20 @@ uv run ql doctor
 uv run ql experiment list
 uv run ql demo load
 uv run ql compare
+uv run ql experiment audit-k0
 ```
 
-`ql demo load` uses **labeled synthetic** bars only (no network).
+`ql demo load` uses **labeled synthetic** bars only (no network). K0 in the demo
+uses `FakeKronosSampler` (not pretrained Kronos weights).
+
+For **real** Kronos (optional):
+
+```bash
+uv sync --extra ml
+uv run ql experiment fetch-k0
+```
+
+That downloads public MIT weights/source once into local `.ql/` (no API key).
 
 ## Evaluation notes
 

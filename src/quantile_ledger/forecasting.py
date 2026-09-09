@@ -1,4 +1,4 @@
-"""Probabilistic forecasting: baselines and M0 adapter surface."""
+"""Probabilistic forecasting: baselines, M0, and K0 adapter surface."""
 
 from __future__ import annotations
 
@@ -6,6 +6,12 @@ from collections.abc import Sequence
 
 from quantile_ledger.baselines import issue_b0_persistence, issue_b1_empirical
 from quantile_ledger.contract import ForecastContract
+from quantile_ledger.kronos_quantile import (
+    FakeKronosSampler,
+    KronosLocalPaths,
+    RealKronosSampler,
+    issue_k0_forecast,
+)
 from quantile_ledger.mamba_quantile import (
     issue_m0_forecast,
     train_m0_model,
@@ -62,8 +68,12 @@ def run_baselines(
 
 
 __all__ = [
+    "FakeKronosSampler",
+    "KronosLocalPaths",
+    "RealKronosSampler",
     "issue_b0_persistence",
     "issue_b1_empirical",
+    "issue_k0_forecast",
     "issue_m0_forecast",
     "run_baselines",
     "train_m0_model",

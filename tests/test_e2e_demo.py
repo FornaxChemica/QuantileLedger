@@ -1,4 +1,4 @@
-"""End-to-end synthetic demo: B0/B1/M0 issue, settle, pair."""
+"""End-to-end synthetic demo: B0/B1/M0/K0 issue, settle, pair."""
 
 from __future__ import annotations
 
@@ -18,14 +18,20 @@ def test_demo_load_and_compare(tmp_path: Path) -> None:
     demo = runner.invoke(app, ["--data-dir", str(data_dir), "demo", "load"])
     assert demo.exit_code == 0, demo.stdout + demo.stderr
     assert "synthetic" in demo.stdout.lower()
+    assert "FakeKronosSampler" in demo.stdout or "K0_samples=" in demo.stdout
     compare = runner.invoke(app, ["--data-dir", str(data_dir), "compare"])
     assert compare.exit_code == 0, compare.stdout + compare.stderr
     assert "paired_n=" in compare.stdout
     assert "B1" in compare.stdout
     assert "M0" in compare.stdout
+    assert "K0" in compare.stdout
     experiments = runner.invoke(
         app, ["--data-dir", str(data_dir), "experiment", "list"]
     )
     assert experiments.exit_code == 0
     assert "M0" in experiments.stdout
+    assert "K0" in experiments.stdout
     assert "Milestone 0" in experiments.stdout
+    audit = runner.invoke(app, ["--data-dir", str(data_dir), "experiment", "audit-k0"])
+    assert audit.exit_code == 0, audit.stdout + audit.stderr
+    assert "sample_quantile_approx" in audit.stdout

@@ -32,9 +32,10 @@ from quantile_ledger.errors import (
     ConfigurationError,
     DatabaseError,
     InsufficientDataError,
+    ModelUnavailableError,
     QuantileLedgerError,
 )
-from quantile_ledger.experiments import M0, get_experiment, list_experiments
+from quantile_ledger.experiments import K0, M0, get_experiment, list_experiments
 from quantile_ledger.forecast_store import (
     freeze_experiment,
     get_forecast_provenance,
@@ -43,6 +44,14 @@ from quantile_ledger.forecast_store import (
     upsert_experiment,
 )
 from quantile_ledger.forecasting import run_baselines
+from quantile_ledger.kronos_quantile import (
+    FakeKronosSampler,
+    KronosLocalPaths,
+    closes_to_ohlc_bars,
+    fetch_kronos_assets,
+    issue_k0_forecast,
+    kronos_bundle_ready,
+)
 from quantile_ledger.logging_setup import configure_logging
 from quantile_ledger.mamba_quantile import issue_m0_forecast, train_m0_model
 from quantile_ledger.runs import close_run, fail_run, open_run
@@ -215,12 +224,12 @@ def signal_cmd(
 
 @app.command("calibration")
 def calibration_cmd(ctx: typer.Context) -> None:
-    """Show paired B1 vs M0 calibration summary from stored settled forecasts."""
+    """Show paired B1 vs M0/K0 calibration summary from stored settled forecasts."""
     try:
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
         settled = _load_settled_forecasts(settings.database_path)
-        paired = build_paired_cohort(settled, experiment_ids=["B1", "M0"])
+        paired = build_paired_cohort(settled, experiment_ids=["B1", "M0", "K0"])
     except (ConfigurationError, DatabaseError, sqlite3.Error, OSError) as exc:
         _fail(str(exc))
     _print_paired(paired)
@@ -228,12 +237,12 @@ def calibration_cmd(ctx: typer.Context) -> None:
 
 @app.command("compare")
 def compare_cmd(ctx: typer.Context) -> None:
-    """Compare B0/B1/M0 on the strict paired settled cohort."""
+    """Compare B0/B1/M0/K0 on the strict paired settled cohort."""
     try:
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
         settled = _load_settled_forecasts(settings.database_path)
-        paired = build_paired_cohort(settled, experiment_ids=["B0", "B1", "M0"])
+        paired = build_paired_cohort(settled, experiment_ids=["B0", "B1", "M0", "K0"])
     except (ConfigurationError, DatabaseError, sqlite3.Error, OSError) as exc:
         _fail(str(exc))
     _print_paired(paired)
@@ -259,7 +268,7 @@ def experiment_list_cmd(ctx: typer.Context) -> None:
     console.print(table)
     console.print(
         "[dim]Note: foundation build 'Milestone 0' ≠ research experiment M0 "
-        "(MambaQuantile).[/dim]"
+        "(MambaQuantile). K0 = Kronos sample quantiles (fake offline).[/dim]"
     )
     _ = ctx
 
@@ -324,6 +333,58 @@ def experiment_audit_m0_cmd() -> None:
         "crossing handled by explicit isotonic_pav_v1"
     )
     console.print("status: candidate (greenfield local SSM; not CUDA mamba-ssm)")
+
+
+@experiment_app.command("audit-k0")
+def experiment_audit_k0_cmd() -> None:
+    """Print the K0 (Kronos sample-quantile) audit checklist status."""
+    console.print("[bold]K0 audit (Kronos sample → quantile, market-only)[/bold]")
+    console.print(f"experiment_id: {K0.experiment_id}")
+    console.print(f"version: {K0.version}")
+    console.print(f"config_hash: {K0.config_hash()}")
+    console.print(f"target: {K0.target_definition}")
+    console.print(f"feature_set: {K0.feature_set}/{K0.feature_version}")
+    console.print(f"quantile_method: {K0.hyperparameters.get('quantile_method')}")
+    console.print(f"distribution_claim: {K0.hyperparameters.get('distribution_claim')}")
+    console.print(f"sample_count: {K0.hyperparameters.get('sample_count')}")
+    console.print(f"upstream_license: {K0.hyperparameters.get('upstream_license')}")
+    console.print(
+        "status: candidate (demo uses fake sampler; real Kronos via "
+        "`uv sync --extra ml` + `ql experiment fetch-k0`)"
+    )
+    console.print(
+        "note: official KronosPredictor averages sample_count; "
+        "real adapter issues single-path calls to retain samples"
+    )
+
+
+@experiment_app.command("fetch-k0")
+def experiment_fetch_k0_cmd(
+    ctx: typer.Context,
+    force: Annotated[
+        bool, typer.Option("--force", help="Re-download even if cache exists")
+    ] = False,
+) -> None:
+    """Download Kronos source + public weights once into local .ql cache."""
+    try:
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        settings.ensure_directories()
+        paths = KronosLocalPaths.under(settings.data_dir)
+        console.print(
+            "[bold]Fetching Kronos (public, no API key) into local cache…[/bold]"
+        )
+        status = fetch_kronos_assets(paths, force=force)
+        for key, value in status.items():
+            console.print(f"  {key}: {value}")
+        if kronos_bundle_ready(paths):
+            console.print(
+                "[green]Ready[/green] — real K0 can load from local cache. "
+                "Demo still uses the fast fake sampler by default."
+            )
+        else:
+            _fail("Kronos bundle incomplete after fetch")
+    except (ConfigurationError, ModelUnavailableError, OSError) as exc:
+        _fail(str(exc))
 
 
 @app.command("export")
@@ -450,7 +511,7 @@ def config_set_cmd(
 
 @demo_app.command("load")
 def demo_load_cmd(ctx: typer.Context) -> None:
-    """Load synthetic bars, issue B0/B1/M0, settle, label synthetic."""
+    """Load synthetic bars, issue B0/B1/M0/K0, settle, label synthetic."""
     try:
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
@@ -459,8 +520,9 @@ def demo_load_cmd(ctx: typer.Context) -> None:
         series = make_synthetic_hourly_closes(ticker="SYN", n=320, seed=7)
         bar_horizon = 6
         lookback = 32
+        k0_lookback = int(K0.hyperparameters["lookback"])
         issue_idx = len(series.closes) - bar_horizon - 1
-        if issue_idx <= lookback + 50:
+        if issue_idx <= max(lookback, k0_lookback) + 50:
             _fail("synthetic series too short")
         closes_known = series.closes[: issue_idx + 1]
         issued_at = series.bar_ends[issue_idx]
@@ -488,6 +550,9 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             payload=model.to_dict(),
             filename_stem="m0-demo",
         )
+        k0_sampler = FakeKronosSampler(lookback=k0_lookback)
+        ohlc = closes_to_ohlc_bars(closes_known)
+        future_ends = series.bar_ends[issue_idx + 1 : issue_idx + bar_horizon + 1]
         with connection(settings.database_path) as conn:
             run_id = open_run(conn, run_type="demo_load", provider="synthetic")
             try:
@@ -545,9 +610,27 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                 )
                 # Prefer digest from written artifact for provenance.
                 m0 = m0.model_copy(update={"artifact_digest": digest})
+                k0 = issue_k0_forecast(
+                    k0_sampler,
+                    bars=ohlc,
+                    bar_ends=series.bar_ends[: issue_idx + 1],
+                    future_bar_ends=future_ends,
+                    ticker=series.ticker,
+                    issued_at=issued_at,
+                    origin_bar_at=origin,
+                    target_at=target_at,
+                    spot_at_issue=spot,
+                    horizon_hours=bar_horizon,
+                    pred_len=bar_horizon,
+                    training_cutoff=training_cutoff,
+                    data_as_of=data_as_of,
+                    seed=7,
+                    is_synthetic=True,
+                    run_id=run_id,
+                )
                 b0 = b0.model_copy(update={"run_id": run_id})
                 b1 = b1.model_copy(update={"run_id": run_id})
-                for fc in (b0, b1, m0):
+                for fc in (b0, b1, m0, k0):
                     insert_forecast(conn, fc)
                     qmap = dict(
                         zip(fc.quantile_levels, fc.quantile_values, strict=True)
@@ -566,7 +649,7 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                     conn,
                     run_id,
                     status="succeeded",
-                    row_counts={"forecasts": 3, "outcomes": 3},
+                    row_counts={"forecasts": 4, "outcomes": 4},
                 )
             except Exception as exc:
                 fail_run(conn, run_id, str(exc))
@@ -575,10 +658,12 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             "[green]Loaded synthetic demo[/green] "
             f"ticker={series.ticker} horizon={bar_horizon}h "
             f"M0_train_pinball={train_metrics['mean_pinball']:.6f} "
+            f"K0_samples={k0.generation_metadata.get('sample_count')} "
             f"artifact={digest[:12]}"
         )
         console.print(
             "[dim]All demo rows are labeled is_synthetic=1. "
+            "K0 uses FakeKronosSampler (not pretrained weights). "
             "Paper-only · no measurable edge claimed.[/dim]"
         )
     except (ConfigurationError, DatabaseError, InsufficientDataError, OSError) as exc:

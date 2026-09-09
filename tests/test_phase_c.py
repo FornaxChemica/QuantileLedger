@@ -116,3 +116,4 @@ def test_optional_deps_report_core_only() -> None:
     status = optional_dependency_status()
     assert status["core"] == "available"
     assert "torch" in status
+    assert status["kronos_fake_adapter"] == "available"

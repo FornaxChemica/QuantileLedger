@@ -94,6 +94,8 @@ def optional_dependency_status() -> dict[str, str]:
     """Report optional stacks without revealing install paths."""
     import importlib.util
 
+    from quantile_ledger.kronos_quantile import kronos_optional_status
+
     names = (
         "torch",
         "mamba_ssm",
@@ -108,4 +110,6 @@ def optional_dependency_status() -> dict[str, str]:
             if importlib.util.find_spec(name) is not None
             else "not_installed"
         )
+    # K0 fake adapter is always available; real Kronos stack is optional.
+    status.update(kronos_optional_status())
     return status
