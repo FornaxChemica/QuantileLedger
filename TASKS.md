@@ -46,9 +46,17 @@ Living checklist. Update status after each verified phase.
 - [x] `ql experiment fetch-k0` one-time public Hub download into `.ql/`
 - [x] Paired compare / calibration include K0 vs B1/M0
 - [x] `ql experiment audit-k0`
+
+## Phase E — TFT T0
+
+- [x] `T0` experiment registry (market-only, same log-return contract)
+- [x] Local TFT-style gated attention + pinball + isotonic (no pytorch-forecasting dep)
+- [x] Demo issues T0 alongside B0/B1/M0/K0; paired compare includes T0
+- [x] `ql experiment audit-t0`
+- [x] End-to-end demo/compare tests
+
 ## Later (not started)
 
-- Phase E TFT T0
 - Phase F FinBERT / news
 - Phase G ablations
 - Phase H calibration / regimes

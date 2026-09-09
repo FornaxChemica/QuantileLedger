@@ -117,3 +117,4 @@ def test_optional_deps_report_core_only() -> None:
     assert status["core"] == "available"
     assert "torch" in status
     assert status["kronos_fake_adapter"] == "available"
+    assert status["tft_local_adapter"] == "available"

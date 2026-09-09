@@ -1,4 +1,4 @@
-"""Probabilistic forecasting: baselines, M0, and K0 adapter surface."""
+"""Probabilistic forecasting: baselines, M0, K0, and T0 adapter surface."""
 
 from __future__ import annotations
 
@@ -15,6 +15,10 @@ from quantile_ledger.kronos_quantile import (
 from quantile_ledger.mamba_quantile import (
     issue_m0_forecast,
     train_m0_model,
+)
+from quantile_ledger.tft_quantile import (
+    issue_t0_forecast,
+    train_t0_model,
 )
 
 
@@ -75,6 +79,8 @@ __all__ = [
     "issue_b1_empirical",
     "issue_k0_forecast",
     "issue_m0_forecast",
+    "issue_t0_forecast",
     "run_baselines",
     "train_m0_model",
+    "train_t0_model",
 ]

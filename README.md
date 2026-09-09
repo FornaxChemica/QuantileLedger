@@ -42,7 +42,8 @@ A **local-first** research tool for US equities/ETFs that:
 | B1 | Rolling empirical return quantiles | Market only | Implemented |
 | M0 | MambaQuantile (local selective SSM) | Market only | Implemented (candidate) |
 | K0 | Kronos sample → empirical quantiles | Market only | Implemented (fake in demo; real via `[ml]` + `fetch-k0`) |
-| T0+ / news / E0 | TFT, FinBERT, ensemble | — | Not implemented |
+| T0 | TFT-style gated attention quantiles | Market only | Implemented (local; not pytorch-forecasting) |
+| news / E0 | FinBERT, ensemble | — | Not implemented |
 
 Target convention: cumulative **log return** `r = log(P_target / P_issue)`,
 with price quantiles `P * exp(r)`.
@@ -59,10 +60,12 @@ uv run ql experiment list
 uv run ql demo load
 uv run ql compare
 uv run ql experiment audit-k0
+uv run ql experiment audit-t0
 ```
 
 `ql demo load` uses **labeled synthetic** bars only (no network). K0 in the demo
-uses `FakeKronosSampler` (not pretrained Kronos weights).
+uses `FakeKronosSampler` (not pretrained Kronos weights). T0 is a local
+TFT-style model (not `pytorch-forecasting`).
 
 For **real** Kronos (optional):
 

@@ -151,11 +151,37 @@ K0 = ExperimentSpec(
     label="exploratory",
 )
 
+T0 = ExperimentSpec(
+    experiment_id="T0",
+    name="tft_quantile_market_only",
+    version="1",
+    model_family="tft_quantile",
+    feature_set=FEATURE_SET_MARKET_ONLY,
+    feature_version=FEATURE_VERSION_V1,
+    target_definition=TARGET_LOG_RETURN,
+    status="candidate",
+    purpose=(
+        "Local TFT-style gated attention multi-quantile model on market-only "
+        "lagged log returns; pytorch-forecasting not required."
+    ),
+    quantiles=DEFAULT_QUANTILES,
+    horizons_hours=DEFAULT_HORIZONS,
+    hyperparameters={
+        "lookback": 32,
+        "hidden_dim": 8,
+        "epochs": 40,
+        "learning_rate": 0.05,
+        "backbone": "local_tft_attention_numpy_v1",
+    },
+    label="exploratory",
+)
+
 REGISTRY: dict[str, ExperimentSpec] = {
     B0.experiment_id: B0,
     B1.experiment_id: B1,
     M0.experiment_id: M0,
     K0.experiment_id: K0,
+    T0.experiment_id: T0,
 }
 
 

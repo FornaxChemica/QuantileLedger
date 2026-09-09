@@ -35,7 +35,7 @@ from quantile_ledger.errors import (
     ModelUnavailableError,
     QuantileLedgerError,
 )
-from quantile_ledger.experiments import K0, M0, get_experiment, list_experiments
+from quantile_ledger.experiments import K0, M0, T0, get_experiment, list_experiments
 from quantile_ledger.forecast_store import (
     freeze_experiment,
     get_forecast_provenance,
@@ -56,6 +56,7 @@ from quantile_ledger.logging_setup import configure_logging
 from quantile_ledger.mamba_quantile import issue_m0_forecast, train_m0_model
 from quantile_ledger.runs import close_run, fail_run, open_run
 from quantile_ledger.synthetic import make_synthetic_hourly_closes, one_step_log_returns
+from quantile_ledger.tft_quantile import issue_t0_forecast, train_t0_model
 
 app = typer.Typer(
     name="ql",
@@ -224,12 +225,12 @@ def signal_cmd(
 
 @app.command("calibration")
 def calibration_cmd(ctx: typer.Context) -> None:
-    """Show paired B1 vs M0/K0 calibration summary from stored settled forecasts."""
+    """Show paired B1 vs M0/K0/T0 calibration summary from stored settled forecasts."""
     try:
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
         settled = _load_settled_forecasts(settings.database_path)
-        paired = build_paired_cohort(settled, experiment_ids=["B1", "M0", "K0"])
+        paired = build_paired_cohort(settled, experiment_ids=["B1", "M0", "K0", "T0"])
     except (ConfigurationError, DatabaseError, sqlite3.Error, OSError) as exc:
         _fail(str(exc))
     _print_paired(paired)
@@ -237,12 +238,14 @@ def calibration_cmd(ctx: typer.Context) -> None:
 
 @app.command("compare")
 def compare_cmd(ctx: typer.Context) -> None:
-    """Compare B0/B1/M0/K0 on the strict paired settled cohort."""
+    """Compare B0/B1/M0/K0/T0 on the strict paired settled cohort."""
     try:
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
         settled = _load_settled_forecasts(settings.database_path)
-        paired = build_paired_cohort(settled, experiment_ids=["B0", "B1", "M0", "K0"])
+        paired = build_paired_cohort(
+            settled, experiment_ids=["B0", "B1", "M0", "K0", "T0"]
+        )
     except (ConfigurationError, DatabaseError, sqlite3.Error, OSError) as exc:
         _fail(str(exc))
     _print_paired(paired)
@@ -268,7 +271,7 @@ def experiment_list_cmd(ctx: typer.Context) -> None:
     console.print(table)
     console.print(
         "[dim]Note: foundation build 'Milestone 0' ≠ research experiment M0 "
-        "(MambaQuantile). K0 = Kronos sample quantiles (fake offline).[/dim]"
+        "(MambaQuantile). K0 = Kronos; T0 = local TFT-style.[/dim]"
     )
     _ = ctx
 
@@ -355,6 +358,25 @@ def experiment_audit_k0_cmd() -> None:
     console.print(
         "note: official KronosPredictor averages sample_count; "
         "real adapter issues single-path calls to retain samples"
+    )
+
+
+@experiment_app.command("audit-t0")
+def experiment_audit_t0_cmd() -> None:
+    """Print the T0 (TFT-style market-only) audit checklist status."""
+    console.print("[bold]T0 audit (local TFT-style quantile, market-only)[/bold]")
+    console.print(f"experiment_id: {T0.experiment_id}")
+    console.print(f"version: {T0.version}")
+    console.print(f"config_hash: {T0.config_hash()}")
+    console.print(f"target: {T0.target_definition}")
+    console.print(f"feature_set: {T0.feature_set}/{T0.feature_version}")
+    console.print(f"backbone: {T0.hyperparameters.get('backbone')}")
+    console.print(
+        "loss: joint pinball across quantiles; "
+        "crossing handled by explicit isotonic_pav_v1"
+    )
+    console.print(
+        "status: candidate (local gated-attention TFT-style; not pytorch-forecasting)"
     )
 
 
@@ -511,7 +533,7 @@ def config_set_cmd(
 
 @demo_app.command("load")
 def demo_load_cmd(ctx: typer.Context) -> None:
-    """Load synthetic bars, issue B0/B1/M0/K0, settle, label synthetic."""
+    """Load synthetic bars, issue B0/B1/M0/K0/T0, settle, label synthetic."""
     try:
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
@@ -542,6 +564,14 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             seed=7,
             min_samples=40,
         )
+        t0_model, t0_train_metrics = train_t0_model(
+            closes_known,
+            bar_horizon=bar_horizon,
+            lookback=lookback,
+            epochs=25,
+            seed=7,
+            min_samples=40,
+        )
         rets = one_step_log_returns(closes_known)
         assert settings.model_dir is not None
         artifact_id, digest, rel = write_json_artifact(
@@ -549,6 +579,12 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             kind="m0_weights",
             payload=model.to_dict(),
             filename_stem="m0-demo",
+        )
+        t0_artifact_id, t0_digest, t0_rel = write_json_artifact(
+            artifacts_dir=settings.model_dir,
+            kind="t0_weights",
+            payload=t0_model.to_dict(),
+            filename_stem="t0-demo",
         )
         k0_sampler = FakeKronosSampler(lookback=k0_lookback)
         ohlc = closes_to_ohlc_bars(closes_known)
@@ -565,6 +601,16 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                     kind="m0_weights",
                     relative_path=str(rel),
                     experiment_id=M0.experiment_id,
+                    model_version_id=None,
+                    metadata={"is_synthetic": True},
+                )
+                register_artifact(
+                    conn,
+                    artifact_id=t0_artifact_id,
+                    digest=t0_digest,
+                    kind="t0_weights",
+                    relative_path=str(t0_rel),
+                    experiment_id=T0.experiment_id,
                     model_version_id=None,
                     metadata={"is_synthetic": True},
                 )
@@ -608,7 +654,6 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                     is_synthetic=True,
                     run_id=run_id,
                 )
-                # Prefer digest from written artifact for provenance.
                 m0 = m0.model_copy(update={"artifact_digest": digest})
                 k0 = issue_k0_forecast(
                     k0_sampler,
@@ -628,9 +673,24 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                     is_synthetic=True,
                     run_id=run_id,
                 )
+                t0 = issue_t0_forecast(
+                    t0_model,
+                    ticker=series.ticker,
+                    issued_at=issued_at,
+                    origin_bar_at=origin,
+                    target_at=target_at,
+                    spot_at_issue=spot,
+                    horizon_hours=bar_horizon,
+                    recent_one_step_log_returns=rets,
+                    training_cutoff=training_cutoff,
+                    data_as_of=data_as_of,
+                    is_synthetic=True,
+                    run_id=run_id,
+                )
+                t0 = t0.model_copy(update={"artifact_digest": t0_digest})
                 b0 = b0.model_copy(update={"run_id": run_id})
                 b1 = b1.model_copy(update={"run_id": run_id})
-                for fc in (b0, b1, m0, k0):
+                for fc in (b0, b1, m0, k0, t0):
                     insert_forecast(conn, fc)
                     qmap = dict(
                         zip(fc.quantile_levels, fc.quantile_values, strict=True)
@@ -649,7 +709,7 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                     conn,
                     run_id,
                     status="succeeded",
-                    row_counts={"forecasts": 4, "outcomes": 4},
+                    row_counts={"forecasts": 5, "outcomes": 5},
                 )
             except Exception as exc:
                 fail_run(conn, run_id, str(exc))
@@ -658,12 +718,14 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             "[green]Loaded synthetic demo[/green] "
             f"ticker={series.ticker} horizon={bar_horizon}h "
             f"M0_train_pinball={train_metrics['mean_pinball']:.6f} "
+            f"T0_train_pinball={t0_train_metrics['mean_pinball']:.6f} "
             f"K0_samples={k0.generation_metadata.get('sample_count')} "
             f"artifact={digest[:12]}"
         )
         console.print(
             "[dim]All demo rows are labeled is_synthetic=1. "
             "K0 uses FakeKronosSampler (not pretrained weights). "
+            "T0 is local TFT-style (not pytorch-forecasting). "
             "Paper-only · no measurable edge claimed.[/dim]"
         )
     except (ConfigurationError, DatabaseError, InsufficientDataError, OSError) as exc:
