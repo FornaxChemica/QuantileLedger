@@ -11,9 +11,30 @@ from pathlib import Path
 from quantile_ledger.errors import DatabaseError
 from quantile_ledger.timeutil import to_iso_utc, utc_now
 
-SCHEMA_VERSION = 1
-SCHEMA_DESCRIPTION = "foundation schema with forecast-ready DDL"
+SCHEMA_VERSION = 3
+SCHEMA_DESCRIPTION = "artifacts table + experiment freeze support"
 BUSY_TIMEOUT_MS = 5000
+
+_V2_FORECAST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("experiment_id", "TEXT"),
+    ("feature_set", "TEXT"),
+    ("feature_version", "TEXT"),
+    ("training_cutoff", "TEXT"),
+    ("data_as_of", "TEXT"),
+    ("target_definition", "TEXT"),
+    ("target_transform", "TEXT"),
+    ("forecast_space", "TEXT"),
+    ("calibration_method", "TEXT"),
+    ("calibration_version", "TEXT"),
+    ("parent_forecast_id", "TEXT"),
+    ("random_seed", "INTEGER"),
+    ("artifact_digest", "TEXT"),
+    ("generation_metadata_json", "TEXT"),
+)
+
+_V2_SCHEMA_DESCRIPTION = (
+    "foundation + forecast contract columns for multi-model comparison"
+)
 
 
 def _load_schema_sql() -> str:
@@ -63,26 +84,89 @@ def get_schema_version(conn: sqlite3.Connection) -> int | None:
     return value if value > 0 else None
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(row["name"]) for row in rows}
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    cols = _table_columns(conn, "forecasts")
+    for name, decl in _V2_FORECAST_COLUMNS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE forecasts ADD COLUMN {name} {decl}")
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            digest TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            experiment_id TEXT REFERENCES experiments (experiment_id),
+            model_version_id TEXT REFERENCES model_versions (model_version_id),
+            metadata_json TEXT
+        )
+        """
+    )
+    exp_cols = _table_columns(conn, "experiments")
+    if "frozen_at" not in exp_cols:
+        conn.execute("ALTER TABLE experiments ADD COLUMN frozen_at TEXT")
+
+
 def initialize_database(database_path: Path) -> int:
-    """Create schema if needed. Idempotent for repeated init."""
+    """Create schema if needed and apply additive migrations. Idempotent."""
     with connection(database_path) as conn:
         current = get_schema_version(conn)
-        if current is not None and current >= SCHEMA_VERSION:
-            _assert_foreign_keys(conn)
-            return current
-
         try:
-            # executescript auto-commits and can clear connection PRAGMAs.
-            conn.executescript(_load_schema_sql())
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute(
-                """
-                INSERT INTO schema_migrations (version, applied_at, description)
-                VALUES (?, ?, ?)
-                ON CONFLICT(version) DO NOTHING
-                """,
-                (SCHEMA_VERSION, to_iso_utc(utc_now()), SCHEMA_DESCRIPTION),
-            )
+            if current is None:
+                conn.executescript(_load_schema_sql())
+                conn.execute("PRAGMA foreign_keys = ON")
+                conn.execute(
+                    """
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(version) DO NOTHING
+                    """,
+                    (
+                        1,
+                        to_iso_utc(utc_now()),
+                        "foundation schema with forecast-ready DDL",
+                    ),
+                )
+                current = 1
+
+            if current < 2:
+                _migrate_to_v2(conn)
+                conn.execute(
+                    """
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(version) DO NOTHING
+                    """,
+                    (2, to_iso_utc(utc_now()), _V2_SCHEMA_DESCRIPTION),
+                )
+                current = 2
+
+            if current < 3:
+                _migrate_to_v3(conn)
+                conn.execute(
+                    """
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(version) DO NOTHING
+                    """,
+                    (3, to_iso_utc(utc_now()), SCHEMA_DESCRIPTION),
+                )
+                current = 3
+
+            if current < SCHEMA_VERSION:
+                msg = (
+                    f"schema migration incomplete: at {current}, want {SCHEMA_VERSION}"
+                )
+                raise DatabaseError(msg)
         except sqlite3.Error as exc:
             msg = f"Failed to initialize schema: {exc}"
             raise DatabaseError(msg) from exc

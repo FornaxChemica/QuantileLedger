@@ -1,64 +1,48 @@
 # QuantileLedger task plan
 
-Living checklist. Update status after each verified milestone.
+Living checklist. Update status after each verified phase.
 
-## Step 0 — GitHub
+## Naming
 
-- [x] Public repo `FornaxChemica/QuantileLedger` created
-- [x] Local `git init` + `origin` remote
-- [ ] First commit (requires staged-diff user approval)
-- [ ] First push (requires separate user approval)
+- Foundation **Milestone 0** = package bootstrap (done).
+- Research **experiment M0** = MambaQuantile market-only (Phase A).
 
-## Milestone 0 — Foundation
+## Foundation Milestone 0
 
-- [x] `uv` + Python 3.12 pin
-- [x] `pyproject.toml` / package layout / `ql` entrypoint
-- [x] MIT license, `.gitignore`, honest README
-- [x] Typed non-secret config
-- [x] SQLite `schema.sql` + versioning + FK/WAL
-- [x] `ql init` / `ql doctor` / `ql config` / `ql watch`
-- [x] Milestone stubs with nonzero exits
-- [x] Verification: `ruff format --check`, `ruff check`, `mypy`, `pytest`
+- [x] Package, `ql`, schema, config, watchlist, tests
 
-## Milestone 1 — Offline vertical slice
+## Phase A — Common contract + M0
 
-- [ ] Synthetic fixtures (labeled)
-- [ ] Baselines + issuance + settlement
-- [ ] Coverage, width, pinball, skill
-- [ ] `ql demo load` / `ql calibration` / e2e tests
+- [x] `ForecastContract` + invariant validation
+- [x] Schema v2 contract columns + migration
+- [x] Experiment registry B0/B1/M0
+- [x] M0 local selective SSM + pinball + isotonic monotonicity
+- [x] Persistence writers + `ql experiment *` / `audit-m0`
+- [x] Contract / M0 tests
 
-## Milestone 2 — Keyless ingestion
+## Phase B — Baselines + paired comparison
 
-- [ ] yfinance optional cache + audit
-- [ ] CSV/JSON/JSONL news import
-- [ ] `ql data *` / doctor freshness
+- [x] B0 persistence + B1 empirical baselines
+- [x] Strict paired cohort + exclusions
+- [x] Pinball, coverage, width, approx CRPS, skill vs B1
+- [x] `ql demo load` / `ql compare` / `ql calibration`
+- [x] Hand-calculated metric + e2e tests
 
-## Milestone 3 — FinBERT
+## Phase C — Experiment registry and reproducibility
 
-- [ ] Local scoring + daily features + spikes
-- [ ] Graceful unavailable path
+- [x] Artifacts table + relative-path digests
+- [x] Experiment freeze immutability
+- [x] Auditable runs on demo load
+- [x] `ql forecast inspect` provenance
+- [x] `ql doctor` optional-extra status (no private paths)
+- [x] Schema v3 migration tests
 
-## Milestone 4 — TFT
+## Later (not started)
 
-- [ ] Chronological train + registry + raw forecasts
-- [ ] Skip cleanly when deps unavailable
-
-## Milestone 5 — Evaluator hardening
-
-- [ ] Approx CRPS/WIS, regimes, CIs, Markdown report
-
-## Milestone 6 — Manual paper ledger
-
-- [ ] Ask buy / bid sell / marks / expiration / reconcile
-
-## Milestone 7 — Mechanical benchmark
-
-- [ ] Frozen rules, no-trades, paired comparison
-
-## Milestone 8 — Local dashboard
-
-- [ ] Streamlit panels reading SQLite only
-
-## Milestone 9 — Local automation / polish
-
-- [ ] `ql nightly` lock + launchd docs + audits
+- Phase D Kronos K0 (optional deps; ask before adding)
+- Phase E TFT T0
+- Phase F FinBERT / news
+- Phase G ablations
+- Phase H calibration / regimes
+- Phase I ensemble E0
+- Phase J champion + paper

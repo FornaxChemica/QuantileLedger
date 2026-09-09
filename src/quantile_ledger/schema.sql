@@ -1,6 +1,8 @@
--- QuantileLedger schema v1
+-- QuantileLedger schema v2
 -- Authoritative local SQLite schema. Apply via ql init / db.initialize_database.
 -- Paper-only / local-only product: no live-order concepts.
+-- v2 adds common forecast-contract columns for multi-model comparison.
+-- Research experiment M0 (MambaQuantile) is distinct from foundation Milestone 0.
 
 PRAGMA foreign_keys = ON;
 
@@ -84,6 +86,7 @@ CREATE TABLE IF NOT EXISTS model_versions (
 CREATE TABLE IF NOT EXISTS forecasts (
     forecast_id TEXT PRIMARY KEY,
     run_id TEXT REFERENCES runs (run_id),
+    experiment_id TEXT REFERENCES experiments (experiment_id),
     ticker TEXT NOT NULL,
     issued_at TEXT NOT NULL,
     origin_bar_at TEXT NOT NULL,
@@ -101,6 +104,19 @@ CREATE TABLE IF NOT EXISTS forecasts (
     status TEXT NOT NULL DEFAULT 'issued',
     is_synthetic INTEGER NOT NULL DEFAULT 0 CHECK (is_synthetic IN (0, 1)),
     created_at TEXT NOT NULL,
+    feature_set TEXT,
+    feature_version TEXT,
+    training_cutoff TEXT,
+    data_as_of TEXT,
+    target_definition TEXT,
+    target_transform TEXT,
+    forecast_space TEXT,
+    calibration_method TEXT,
+    calibration_version TEXT,
+    parent_forecast_id TEXT,
+    random_seed INTEGER,
+    artifact_digest TEXT,
+    generation_metadata_json TEXT,
     CHECK (target_at > issued_at),
     CHECK (maximum_feature_timestamp <= issued_at),
     UNIQUE (ticker, issued_at, horizon_hours, model_version_id, variant)
@@ -203,5 +219,17 @@ CREATE TABLE IF NOT EXISTS experiments (
     started_at TEXT,
     min_sample_goal INTEGER,
     notes TEXT,
+    frozen_at TEXT,
     UNIQUE (name, version)
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    digest TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    experiment_id TEXT REFERENCES experiments (experiment_id),
+    model_version_id TEXT REFERENCES model_versions (model_version_id),
+    metadata_json TEXT
 );

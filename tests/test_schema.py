@@ -47,7 +47,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
     with connection(db_path) as conn:
         count = conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()
         assert count is not None
-        assert int(count["n"]) == 1
+        assert int(count["n"]) == SCHEMA_VERSION
 
 
 def test_foreign_keys_reject_orphan_outcome(tmp_path: Path) -> None:

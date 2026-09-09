@@ -9,15 +9,23 @@
 **Tagline:** A point-in-time ledger for probabilistic forecasts, calibration,
 and paper trades.
 
+## Naming note
+
+- **Foundation Milestone 0** — package/CLI/schema bootstrap (complete).
+- **Research experiment `M0`** — MambaQuantile, market-only candidate (implemented
+  locally as a diagonal selective SSM + pinball; not the CUDA `mamba-ssm` package).
+
+These IDs are intentionally different.
+
 ## What it is
 
 A **local-first** research tool for US equities/ETFs that:
 
-- records immutable point-in-time quantile forecasts;
+- records immutable point-in-time quantile forecasts under a common contract;
 - settles them with honest walk-forward rules;
 - scores calibration **together with** interval sharpness;
-- compares models to simple baselines on identical outcomes;
-- tracks **paper-only** long-option decisions (manual and mechanical).
+- compares models to simple baselines (especially **B1**) on identical outcomes;
+- tracks **paper-only** long-option decisions (manual and mechanical; later).
 
 ## What it is not
 
@@ -26,68 +34,42 @@ A **local-first** research tool for US equities/ETFs that:
 - Not a cloud service (no hosted DB, CI, telemetry, or deployed dashboard).
 - Not an authenticated market-data client (no API keys).
 
-## Current status
+## Research matrix (current)
 
-**Milestone 0 — Foundation** is complete:
+| ID | Candidate | Features | Status |
+|----|-----------|----------|--------|
+| B0 | Persistence (P50 log-return = 0) | Market only | Implemented |
+| B1 | Rolling empirical return quantiles | Market only | Implemented |
+| M0 | MambaQuantile (local selective SSM) | Market only | Implemented (candidate) |
+| K0 / T0+ / news / E0 | Kronos, TFT, FinBERT, ensemble | — | Not implemented |
 
-| Capability | Status |
-|------------|--------|
-| Package + `ql` CLI | Implemented |
-| Local config (no secrets) | Implemented |
-| SQLite schema + `ql init` / `ql doctor` / watchlist | Implemented |
-| Offline synthetic demo | Planned (Milestone 1) |
-| Baselines + calibration | Planned (Milestone 1) |
-| Keyless yfinance cache | Planned (Milestone 2) |
-| FinBERT / TFT | Planned (Milestones 3–4) |
-| Paper ledger / mechanical | Planned (Milestones 6–7) |
-| Streamlit dashboard | Planned (Milestone 8) |
+Target convention: cumulative **log return** `r = log(P_target / P_issue)`,
+with price quantiles `P * exp(r)`.
 
-There is **insufficient settled evidence** to claim forecast skill. Treat all
-future live or synthetic metrics as labeled experiments.
+## Quick start
 
-## Quick start (Milestone 0)
-
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.11–3.12 (pinned to 3.12
-via `.python-version`).
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.11–3.12.
 
 ```bash
 uv sync
 uv run ql init
 uv run ql doctor
-uv run ql watch list
-```
-
-Data defaults to `./.ql/` (SQLite database, caches, logs). Override with
-`--data-dir`.
-
-Offline demo (Milestone 1, not yet available):
-
-```bash
+uv run ql experiment list
 uv run ql demo load
-uv run ql calibration
+uv run ql compare
 ```
 
-## Design guarantees
+`ql demo load` uses **labeled synthetic** bars only (no network).
 
-- **Paper only:** fills and positions are hypothetical.
-- **Local only:** application data stays on your machine.
-- **Keyless:** no API-key settings; optional later yfinance access is read-only
-  and unofficial/research-use.
-- **Point-in-time integrity:** features and news must not post-date issuance.
-- **Raw forecasts are immutable;** adjusted variants are separate rows.
-- **Calibration ≠ profitability:** a calibrated price forecast does not prove
-  option edge.
+## Evaluation notes
 
-## Evaluation notes (planned)
+For P10–P90, nominal coverage is 80%. Coverage is always shown with width and
+sample size `N`. Sparse-quantile CRPS is an **approximation**. Skill vs B1:
+`1 - L_model / L_B1` (positive = better than B1).
 
-For P10–P90 intervals, nominal coverage is 80% (expected breach rate ~20%).
-Coverage is always reported with width/sharpness and sample size `N`. Sparse
-quantile CRPS is an **approximation**, not exact full-distribution CRPS.
+## Privacy
 
-## Privacy and artifacts
-
-Ignored locally (never commit): `.ql/`, `*.db`, model weights, caches, reports,
-and any accidental `.env` files. See `.gitignore`.
+Ignored locally: `.ql/`, `*.db`, model weights, caches, reports. See `.gitignore`.
 
 ## License
 
@@ -95,4 +77,4 @@ MIT. Research / educational use. No warranty. Not investment advice.
 
 ## Roadmap
 
-See [TASKS.md](TASKS.md) for the milestone checklist.
+See [TASKS.md](TASKS.md).

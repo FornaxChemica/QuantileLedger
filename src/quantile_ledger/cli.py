@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Annotated
@@ -12,6 +13,12 @@ from rich.console import Console
 from rich.table import Table
 
 from quantile_ledger import __version__
+from quantile_ledger.artifacts import (
+    optional_dependency_status,
+    register_artifact,
+    write_json_artifact,
+)
+from quantile_ledger.compare import SettledForecast, build_paired_cohort
 from quantile_ledger.config import load_settings, save_settings, set_setting
 from quantile_ledger.db import (
     add_watchlist_ticker,
@@ -24,9 +31,22 @@ from quantile_ledger.db import (
 from quantile_ledger.errors import (
     ConfigurationError,
     DatabaseError,
+    InsufficientDataError,
     QuantileLedgerError,
 )
+from quantile_ledger.experiments import M0, get_experiment, list_experiments
+from quantile_ledger.forecast_store import (
+    freeze_experiment,
+    get_forecast_provenance,
+    insert_forecast,
+    insert_outcome,
+    upsert_experiment,
+)
+from quantile_ledger.forecasting import run_baselines
 from quantile_ledger.logging_setup import configure_logging
+from quantile_ledger.mamba_quantile import issue_m0_forecast, train_m0_model
+from quantile_ledger.runs import close_run, fail_run, open_run
+from quantile_ledger.synthetic import make_synthetic_hourly_closes, one_step_log_returns
 
 app = typer.Typer(
     name="ql",
@@ -40,11 +60,12 @@ app = typer.Typer(
 watch_app = typer.Typer(help="Manage the local equity/ETF watchlist.")
 config_app = typer.Typer(help="Show or update non-secret local settings.")
 data_app = typer.Typer(help="Local data fetch/import status (Milestone 2+).")
-model_app = typer.Typer(help="Model registry commands (Milestone 1/4).")
-forecast_app = typer.Typer(help="Forecast issuance and settlement (Milestone 1+).")
+model_app = typer.Typer(help="Model registry commands.")
+forecast_app = typer.Typer(help="Forecast issuance and settlement.")
 paper_app = typer.Typer(help="Manual paper-only long options (Milestone 6).")
 mechanical_app = typer.Typer(help="Mechanical paper benchmark (Milestone 7).")
-demo_app = typer.Typer(help="Deterministic offline synthetic demo (Milestone 1).")
+demo_app = typer.Typer(help="Deterministic offline synthetic demo.")
+experiment_app = typer.Typer(help="Research-matrix experiment registry.")
 
 app.add_typer(watch_app, name="watch")
 app.add_typer(config_app, name="config")
@@ -54,6 +75,7 @@ app.add_typer(forecast_app, name="forecast")
 app.add_typer(paper_app, name="paper")
 app.add_typer(mechanical_app, name="mechanical")
 app.add_typer(demo_app, name="demo")
+app.add_typer(experiment_app, name="experiment")
 
 console = Console(stderr=False)
 err_console = Console(stderr=True)
@@ -110,8 +132,10 @@ def init_cmd(
         assert settings.database_path is not None
         version = initialize_database(settings.database_path)
         save_settings(settings)
-        if seed_watchlist:
-            with connection(settings.database_path) as conn:
+        with connection(settings.database_path) as conn:
+            for spec in list_experiments():
+                upsert_experiment(conn, spec)
+            if seed_watchlist:
                 existing = list_watchlist(conn, active_only=False)
                 if not existing:
                     for ticker in settings.watchlist:
@@ -153,6 +177,8 @@ def doctor_cmd(ctx: typer.Context) -> None:
     table.add_row("paper_trading", "paper-only (no live orders)")
     table.add_row("api_keys", "not supported")
     table.add_row("telemetry", "disabled")
+    for name, state in optional_dependency_status().items():
+        table.add_row(f"extra:{name}", state)
     if db_info["error"]:
         table.add_row("database_error", str(db_info["error"]))
     console.print(table)
@@ -188,15 +214,116 @@ def signal_cmd(
 
 
 @app.command("calibration")
-def calibration_cmd() -> None:
-    """Show walk-forward calibration summary (Milestone 1)."""
-    _milestone_stub("ql calibration", "Milestone 1")
+def calibration_cmd(ctx: typer.Context) -> None:
+    """Show paired B1 vs M0 calibration summary from stored settled forecasts."""
+    try:
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        settled = _load_settled_forecasts(settings.database_path)
+        paired = build_paired_cohort(settled, experiment_ids=["B1", "M0"])
+    except (ConfigurationError, DatabaseError, sqlite3.Error, OSError) as exc:
+        _fail(str(exc))
+    _print_paired(paired)
 
 
 @app.command("compare")
-def compare_cmd() -> None:
-    """Compare manual vs mechanical paper series (Milestone 7)."""
-    _milestone_stub("ql compare", "Milestone 7")
+def compare_cmd(ctx: typer.Context) -> None:
+    """Compare B0/B1/M0 on the strict paired settled cohort."""
+    try:
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        settled = _load_settled_forecasts(settings.database_path)
+        paired = build_paired_cohort(settled, experiment_ids=["B0", "B1", "M0"])
+    except (ConfigurationError, DatabaseError, sqlite3.Error, OSError) as exc:
+        _fail(str(exc))
+    _print_paired(paired)
+
+
+@experiment_app.command("list")
+def experiment_list_cmd(ctx: typer.Context) -> None:
+    """List research-matrix experiment identities."""
+    table = Table(title="Experiments")
+    table.add_column("ID")
+    table.add_column("Name")
+    table.add_column("Family")
+    table.add_column("Features")
+    table.add_column("Status")
+    for spec in list_experiments():
+        table.add_row(
+            spec.experiment_id,
+            spec.name,
+            spec.model_family,
+            spec.feature_set,
+            spec.status,
+        )
+    console.print(table)
+    console.print(
+        "[dim]Note: foundation build 'Milestone 0' ≠ research experiment M0 "
+        "(MambaQuantile).[/dim]"
+    )
+    _ = ctx
+
+
+@experiment_app.command("inspect")
+def experiment_inspect_cmd(experiment_id: Annotated[str, typer.Argument()]) -> None:
+    """Show immutable experiment configuration."""
+    try:
+        spec = get_experiment(experiment_id.upper())
+    except KeyError as exc:
+        _fail(str(exc))
+    console.print_json(json.dumps(spec.to_record(), indent=2, sort_keys=True))
+
+
+@experiment_app.command("freeze")
+def experiment_freeze_cmd(
+    ctx: typer.Context,
+    experiment_id: Annotated[str, typer.Argument()],
+) -> None:
+    """Freeze an experiment configuration (immutable thereafter)."""
+    try:
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        eid = experiment_id.upper()
+        get_experiment(eid)  # validate known id for now
+        with connection(settings.database_path) as conn:
+            upsert_experiment(conn, get_experiment(eid))
+            freeze_experiment(conn, eid)
+        console.print(f"[green]Frozen[/green] experiment {eid}")
+    except (KeyError, ConfigurationError, DatabaseError) as exc:
+        _fail(str(exc))
+
+
+@forecast_app.command("inspect")
+def forecast_inspect_cmd(
+    ctx: typer.Context,
+    forecast_id: Annotated[str, typer.Argument()],
+) -> None:
+    """Trace a forecast to experiment, cutoffs, and artifact digest."""
+    try:
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            prov = get_forecast_provenance(conn, forecast_id)
+        console.print_json(json.dumps(prov, indent=2, sort_keys=True, default=str))
+    except (ConfigurationError, DatabaseError) as exc:
+        _fail(str(exc))
+
+
+@experiment_app.command("audit-m0")
+def experiment_audit_m0_cmd() -> None:
+    """Print the M0 (MambaQuantile market-only) audit checklist status."""
+    console.print("[bold]M0 audit (MambaQuantile, market-only)[/bold]")
+    console.print(f"experiment_id: {M0.experiment_id}")
+    console.print(f"version: {M0.version}")
+    console.print(f"config_hash: {M0.config_hash()}")
+    console.print(f"target: {M0.target_definition}")
+    console.print(f"feature_set: {M0.feature_set}/{M0.feature_version}")
+    console.print(f"backbone: {M0.hyperparameters.get('backbone')}")
+    console.print(
+        "loss: joint pinball across quantiles; "
+        "crossing handled by explicit isotonic_pav_v1"
+    )
+    console.print("status: candidate (greenfield local SSM; not CUDA mamba-ssm)")
 
 
 @app.command("export")
@@ -322,9 +449,219 @@ def config_set_cmd(
 
 
 @demo_app.command("load")
-def demo_load_cmd() -> None:
-    """Load deterministic synthetic demo data (Milestone 1)."""
-    _milestone_stub("ql demo load", "Milestone 1")
+def demo_load_cmd(ctx: typer.Context) -> None:
+    """Load synthetic bars, issue B0/B1/M0, settle, label synthetic."""
+    try:
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        if not settings.database_path.exists():
+            _fail("Database missing. Run: ql init")
+        series = make_synthetic_hourly_closes(ticker="SYN", n=320, seed=7)
+        bar_horizon = 6
+        lookback = 32
+        issue_idx = len(series.closes) - bar_horizon - 1
+        if issue_idx <= lookback + 50:
+            _fail("synthetic series too short")
+        closes_known = series.closes[: issue_idx + 1]
+        issued_at = series.bar_ends[issue_idx]
+        origin = issued_at
+        target_at = series.bar_ends[issue_idx + bar_horizon]
+        spot = closes_known[-1]
+        outcome_price = series.closes[issue_idx + bar_horizon]
+        actual_return = math.log(outcome_price / spot)
+        training_cutoff = issued_at
+        data_as_of = issued_at
+
+        model, train_metrics = train_m0_model(
+            closes_known,
+            bar_horizon=bar_horizon,
+            lookback=lookback,
+            epochs=25,
+            seed=7,
+            min_samples=40,
+        )
+        rets = one_step_log_returns(closes_known)
+        assert settings.model_dir is not None
+        artifact_id, digest, rel = write_json_artifact(
+            artifacts_dir=settings.model_dir,
+            kind="m0_weights",
+            payload=model.to_dict(),
+            filename_stem="m0-demo",
+        )
+        with connection(settings.database_path) as conn:
+            run_id = open_run(conn, run_type="demo_load", provider="synthetic")
+            try:
+                for spec in list_experiments():
+                    upsert_experiment(conn, spec)
+                register_artifact(
+                    conn,
+                    artifact_id=artifact_id,
+                    digest=digest,
+                    kind="m0_weights",
+                    relative_path=str(rel),
+                    experiment_id=M0.experiment_id,
+                    model_version_id=None,
+                    metadata={"is_synthetic": True},
+                )
+                b0 = run_baselines(
+                    mode="B0",
+                    ticker=series.ticker,
+                    issued_at=issued_at,
+                    origin_bar_at=origin,
+                    target_at=target_at,
+                    spot_at_issue=spot,
+                    horizon_hours=bar_horizon,
+                    training_cutoff=training_cutoff,
+                    data_as_of=data_as_of,
+                    is_synthetic=True,
+                )
+                b1 = run_baselines(
+                    mode="B1",
+                    ticker=series.ticker,
+                    issued_at=issued_at,
+                    origin_bar_at=origin,
+                    target_at=target_at,
+                    spot_at_issue=spot,
+                    horizon_hours=bar_horizon,
+                    training_cutoff=training_cutoff,
+                    data_as_of=data_as_of,
+                    closes_known_by_issue=closes_known,
+                    bar_horizon=bar_horizon,
+                    is_synthetic=True,
+                )
+                m0 = issue_m0_forecast(
+                    model,
+                    ticker=series.ticker,
+                    issued_at=issued_at,
+                    origin_bar_at=origin,
+                    target_at=target_at,
+                    spot_at_issue=spot,
+                    horizon_hours=bar_horizon,
+                    recent_one_step_log_returns=rets,
+                    training_cutoff=training_cutoff,
+                    data_as_of=data_as_of,
+                    is_synthetic=True,
+                    run_id=run_id,
+                )
+                # Prefer digest from written artifact for provenance.
+                m0 = m0.model_copy(update={"artifact_digest": digest})
+                b0 = b0.model_copy(update={"run_id": run_id})
+                b1 = b1.model_copy(update={"run_id": run_id})
+                for fc in (b0, b1, m0):
+                    insert_forecast(conn, fc)
+                    qmap = dict(
+                        zip(fc.quantile_levels, fc.quantile_values, strict=True)
+                    )
+                    insert_outcome(
+                        conn,
+                        forecast_id=fc.forecast_id,
+                        outcome_price=outcome_price,
+                        actual_return=actual_return,
+                        outcome_bar_at=target_at,
+                        settled_at=target_at,
+                        p10=qmap[0.10],
+                        p90=qmap[0.90],
+                    )
+                close_run(
+                    conn,
+                    run_id,
+                    status="succeeded",
+                    row_counts={"forecasts": 3, "outcomes": 3},
+                )
+            except Exception as exc:
+                fail_run(conn, run_id, str(exc))
+                raise
+        console.print(
+            "[green]Loaded synthetic demo[/green] "
+            f"ticker={series.ticker} horizon={bar_horizon}h "
+            f"M0_train_pinball={train_metrics['mean_pinball']:.6f} "
+            f"artifact={digest[:12]}"
+        )
+        console.print(
+            "[dim]All demo rows are labeled is_synthetic=1. "
+            "Paper-only · no measurable edge claimed.[/dim]"
+        )
+    except (ConfigurationError, DatabaseError, InsufficientDataError, OSError) as exc:
+        _fail(str(exc))
+
+
+def _load_settled_forecasts(database_path: Path) -> list[SettledForecast]:
+    with connection(database_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT f.forecast_id, f.experiment_id, f.ticker, f.issued_at,
+                   f.origin_bar_at, f.target_at, f.horizon_hours, f.spot_at_issue,
+                   f.price_type, o.actual_return
+            FROM forecasts f
+            JOIN outcomes o ON o.forecast_id = f.forecast_id
+            WHERE o.actual_return IS NOT NULL
+              AND f.experiment_id IS NOT NULL
+            """
+        ).fetchall()
+        out: list[SettledForecast] = []
+        for row in rows:
+            qrows = conn.execute(
+                """
+                SELECT q, return_value FROM forecast_quantiles
+                WHERE forecast_id = ? ORDER BY q
+                """,
+                (row["forecast_id"],),
+            ).fetchall()
+            levels = tuple(float(q["q"]) for q in qrows)
+            values = tuple(float(q["return_value"]) for q in qrows)
+            out.append(
+                SettledForecast(
+                    forecast_id=row["forecast_id"],
+                    experiment_id=row["experiment_id"],
+                    ticker=row["ticker"],
+                    issued_at=row["issued_at"],
+                    origin_bar_at=row["origin_bar_at"],
+                    target_at=row["target_at"],
+                    horizon_hours=int(row["horizon_hours"]),
+                    spot_at_issue=float(row["spot_at_issue"]),
+                    quantile_levels=levels,
+                    quantile_values=values,
+                    actual_return=float(row["actual_return"]),
+                    price_type=row["price_type"],
+                )
+            )
+        return out
+
+
+def _print_paired(paired: object) -> None:
+    from quantile_ledger.compare import PairedComparison
+
+    assert isinstance(paired, PairedComparison)
+    console.print(f"paired_n={len(paired.cohort)} exclusions={len(paired.exclusions)}")
+    table = Table(title="Paired comparison (return space)")
+    table.add_column("Experiment")
+    table.add_column("N")
+    table.add_column("Pinball")
+    table.add_column("Cov P10-P90")
+    table.add_column("Width")
+    table.add_column("Skill vs B1")
+    for eid, metrics in paired.metrics_by_experiment.items():
+        table.add_row(
+            eid,
+            str(metrics.get("sample_count")),
+            _fmt(metrics.get("mean_pinball")),
+            _fmt(metrics.get("coverage_p10_p90")),
+            _fmt(metrics.get("mean_width_return")),
+            _fmt(metrics.get("skill_vs_B1")),
+        )
+    console.print(table)
+    console.print(
+        "[dim]Coverage is shown beside width. Approx CRPS is quantile-grid only. "
+        "Negative skill means worse than B1.[/dim]"
+    )
+
+
+def _fmt(value: object) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:.6f}"
+    return str(value)
 
 
 @data_app.command("fetch")

@@ -47,9 +47,9 @@ def test_init_doctor_watch_roundtrip(tmp_path: Path) -> None:
 def test_milestone_stub_nonzero_exit(tmp_path: Path) -> None:
     data_dir = tmp_path / "ql-data"
     runner.invoke(app, ["--data-dir", str(data_dir), "init"])
-    result = runner.invoke(app, ["--data-dir", str(data_dir), "demo", "load"])
+    result = runner.invoke(app, ["--data-dir", str(data_dir), "nightly"])
     assert result.exit_code == 2
-    assert "Milestone 1" in result.stdout + result.stderr
+    assert "Milestone 9" in result.stdout + result.stderr
 
 
 def test_config_show_and_set(tmp_path: Path) -> None:
