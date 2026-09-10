@@ -277,6 +277,22 @@ CREATE TABLE IF NOT EXISTS paper_cash_ledger (
     note TEXT
 );
 
+-- Phase J1: mid accounting marks vs bid liquidation marks (distinct).
+CREATE TABLE IF NOT EXISTS paper_marks (
+    mark_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES paper_accounts (account_id),
+    marked_at TEXT NOT NULL,
+    cash TEXT NOT NULL,
+    equity_mid TEXT NOT NULL,
+    equity_bid TEXT NOT NULL,
+    quote_source TEXT NOT NULL,
+    data_quality TEXT NOT NULL DEFAULT 'ok',
+    is_forward INTEGER NOT NULL DEFAULT 1 CHECK (is_forward IN (0, 1)),
+    is_synthetic INTEGER NOT NULL DEFAULT 0 CHECK (is_synthetic IN (0, 1)),
+    positions_json TEXT NOT NULL,
+    note TEXT
+);
+
 CREATE TABLE IF NOT EXISTS experiments (
     experiment_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

@@ -17,7 +17,7 @@ sample size `N`.
 - Research **experiment M0** = MambaQuantile market-only (Phase A).
 - **K0 / T0** = Kronos and TFT-style **challengers** vs primary baseline **B1**.
 
-## Audit snapshot (2026-09-08)
+## Audit snapshot (2026-09-09)
 
 | Area | Status |
 |------|--------|
@@ -25,10 +25,10 @@ sample size `N`.
 | B0 / B1 baselines | Done |
 | M0, K0, T0 challengers (market-only) | Done (demo comparable) |
 | Experiment freeze / artifacts / provenance | Done |
-| Genuine forward walk-forward jobs | Not started (`jobs.py` stub) |
-| Underlying long/flat paper policy | **In progress** (schema v4 + freeze + costs) |
-| Policy freeze before forward paper book | Done (API + CLI); mechanical runner pending |
-| Forward paper P&L accumulation | Partial (ledger ready; multi-day forward job pending) |
+| Genuine forward walk-forward jobs | Partial (synthetic multi-day paper job; nightly `jobs.py` still stub) |
+| Underlying long/flat paper policy | **Done** (J1: schema v5 marks + mechanical + forward-demo) |
+| Policy freeze before forward paper book | Done (API + CLI + mechanical runner) |
+| Forward paper P&L accumulation | Done (synthetic multi-day forward-demo + mid/bid equity curve) |
 | News / FinBERT controlled ablations | Not started |
 | Options paper trading | **Blocked** until underlying economic-value evidence |
 | Streamlit dashboard / nightly | Not started |
@@ -94,7 +94,7 @@ sample size `N`.
 - [x] `ql experiment audit-t0`
 - [x] End-to-end demo/compare tests
 
-## Phase J1 — Underlying long/flat paper (in progress)
+## Phase J1 — Underlying long/flat paper (done)
 
 Gate: paper book uses **equity long/flat only**. Options stay unimplemented.
 
@@ -108,8 +108,8 @@ Gate: paper book uses **equity long/flat only**. Options stay unimplemented.
 - [x] Forward flag on decisions/fills (`is_forward`)
 - [x] Docs/AGENTS/TASKS/README: options deferred until underlying evidence
 - [x] Mechanical runner linking settled challenger forecasts → decide/fill
-- [ ] Mark-to-market (mid vs bid liquidation) + equity curve report
-- [ ] Accumulate multi-day genuinely forward paper results (beyond unit tests)
+- [x] Mark-to-market (mid vs bid liquidation) + equity curve report
+- [x] Accumulate multi-day genuinely forward paper results (beyond unit tests)
 
 ## Phase F — Local news + FinBERT (ablations)
 

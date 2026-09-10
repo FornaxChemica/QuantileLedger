@@ -22,10 +22,10 @@ from quantile_ledger.mamba_quantile import train_m0_model
 from quantile_ledger.synthetic import make_synthetic_hourly_closes
 
 
-def test_schema_migrates_to_v4(tmp_path: Path) -> None:
+def test_schema_migrates_to_v5(tmp_path: Path) -> None:
     db = tmp_path / "t.db"
     version = initialize_database(db)
-    assert version == SCHEMA_VERSION == 4
+    assert version == SCHEMA_VERSION == 5
     with connection(db) as conn:
         tables = {
             r["name"]
@@ -34,6 +34,7 @@ def test_schema_migrates_to_v4(tmp_path: Path) -> None:
         assert "artifacts" in tables
         assert "paper_policies" in tables
         assert "paper_fills" in tables
+        assert "paper_marks" in tables
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(experiments)")}
         assert "frozen_at" in cols
 

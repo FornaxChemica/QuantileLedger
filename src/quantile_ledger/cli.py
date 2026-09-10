@@ -1071,32 +1071,241 @@ def paper_history_cmd(ctx: typer.Context) -> None:
 
 @paper_app.command("stats")
 def paper_stats_cmd(ctx: typer.Context) -> None:
-    """Show paper cash balances (hypothetical)."""
+    """Show paper cash, mid/bid equity, and forward decision/fill counts."""
     try:
-        from quantile_ledger.paper import latest_cash_balance
+        from quantile_ledger.paper import paper_equity_summary
 
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
         with connection(settings.database_path) as conn:
             accounts = conn.execute(
-                "SELECT account_id, name, starting_cash FROM paper_accounts"
+                "SELECT account_id, name FROM paper_accounts ORDER BY name"
             ).fetchall()
             if not accounts:
                 console.print("[yellow]No paper accounts.[/yellow]")
                 return
             for acct in accounts:
-                bal = latest_cash_balance(conn, acct["account_id"])
-                console.print(
-                    f"{acct['name']}: cash={bal} "
-                    f"(start={acct['starting_cash']}) [dim]paper[/dim]"
+                summary = paper_equity_summary(conn, acct["account_id"])
+                mid = (
+                    str(summary.equity_mid) if summary.equity_mid is not None else "n/a"
                 )
-    except (ConfigurationError, DatabaseError) as exc:
+                bid = (
+                    str(summary.equity_bid) if summary.equity_bid is not None else "n/a"
+                )
+                ret_mid = (
+                    f"{summary.return_mid:.6f}"
+                    if summary.return_mid is not None
+                    else "n/a"
+                )
+                ret_bid = (
+                    f"{summary.return_bid:.6f}"
+                    if summary.return_bid is not None
+                    else "n/a"
+                )
+                console.print(
+                    f"[bold]{summary.name}[/bold] "
+                    f"cash={summary.cash} start={summary.starting_cash} "
+                    f"equity_mid={mid} equity_bid={bid} "
+                    f"ret_mid={ret_mid} ret_bid={ret_bid} "
+                    f"marks={summary.mark_count} "
+                    f"decisions={summary.decision_count}"
+                    f"/{summary.forward_decision_count}fwd "
+                    f"fills={summary.fill_count}/{summary.forward_fill_count}fwd "
+                    "[dim]paper[/dim]"
+                )
+    except (ConfigurationError, DatabaseError, QuantileLedgerError) as exc:
         _fail(str(exc))
 
 
 @paper_app.command("mark")
-def paper_mark_cmd() -> None:
-    _milestone_stub("ql paper mark", "Phase J1 marks")
+def paper_mark_cmd(
+    ctx: typer.Context,
+    account_id: Annotated[str, typer.Option("--account-id")],
+    spot: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--spot",
+            help="Ticker=spot mid (repeatable). Bid/ask from policy half-spread.",
+        ),
+    ] = None,
+    from_last_fill: Annotated[
+        bool,
+        typer.Option(
+            "--from-last-fill",
+            help="Mark open positions using bid/ask from the latest fill per ticker.",
+        ),
+    ] = False,
+    half_spread_bps: Annotated[
+        str | None,
+        typer.Option(
+            "--half-spread-bps",
+            help="Half-spread bps when using --spot (default: policy or 5).",
+        ),
+    ] = None,
+    exploratory: Annotated[
+        bool,
+        typer.Option("--exploratory", help="Store mark with is_forward=0."),
+    ] = False,
+) -> None:
+    """Record mid accounting vs bid liquidation marks (hypothetical)."""
+    try:
+        from quantile_ledger.mechanical import quote_from_spot
+        from quantile_ledger.paper import (
+            get_policy,
+            list_open_positions,
+            quotes_from_last_fills,
+            record_account_mark,
+        )
+
+        if bool(spot) == from_last_fill:
+            _fail("Provide exactly one of --spot TICKER=PRICE or --from-last-fill")
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            positions = list_open_positions(conn, account_id)
+            if from_last_fill:
+                quotes = quotes_from_last_fills(
+                    conn, account_id, list(positions.keys())
+                )
+                source = "last_fill"
+            else:
+                assert spot is not None
+                spread = half_spread_bps
+                if spread is None:
+                    row = conn.execute(
+                        """
+                        SELECT policy_id FROM paper_decisions
+                        WHERE account_id = ?
+                        ORDER BY decided_at DESC, rowid DESC LIMIT 1
+                        """,
+                        (account_id,),
+                    ).fetchone()
+                    if row is not None:
+                        spread = get_policy(conn, row["policy_id"]).half_spread_bps
+                    else:
+                        spread = settings.paper_equity_half_spread_bps
+                quotes = {}
+                for item in spot:
+                    if "=" not in item:
+                        _fail(f"invalid --spot {item!r}; expected TICKER=PRICE")
+                    ticker, price_s = item.split("=", 1)
+                    quotes[ticker.upper()] = quote_from_spot(
+                        ticker=ticker,
+                        spot=float(price_s),
+                        half_spread_bps=spread,
+                        quote_time="",
+                        quality="cli_spot",
+                    )
+                source = "cli_spot"
+            missing = [t for t in positions if t not in quotes]
+            if missing:
+                _fail(f"missing quotes for open positions: {', '.join(missing)}")
+            mark = record_account_mark(
+                conn,
+                account_id=account_id,
+                quotes=quotes,
+                quote_source=source,
+                is_forward=not exploratory,
+                is_synthetic=False,
+            )
+        console.print(
+            "[green]Paper mark[/green] "
+            f"cash={mark.cash} equity_mid={mark.equity_mid} "
+            f"equity_bid={mark.equity_bid} positions={len(mark.positions)} "
+            f"source={source} [dim]paper[/dim]"
+        )
+    except (ConfigurationError, DatabaseError, QuantileLedgerError, ValueError) as exc:
+        _fail(str(exc))
+
+
+@paper_app.command("equity")
+def paper_equity_cmd(
+    ctx: typer.Context,
+    account_id: Annotated[str, typer.Option("--account-id")],
+) -> None:
+    """Print the stored mid vs bid equity curve (hypothetical)."""
+    try:
+        from quantile_ledger.paper import list_marks
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            marks = list_marks(conn, account_id)
+        if not marks:
+            console.print("[yellow]No paper marks yet.[/yellow]")
+            return
+        table = Table(title="Paper equity curve (hypothetical)")
+        table.add_column("Marked at")
+        table.add_column("Cash")
+        table.add_column("Equity mid")
+        table.add_column("Equity bid")
+        table.add_column("Pos")
+        table.add_column("Fwd")
+        table.add_column("Source")
+        for mark in marks:
+            table.add_row(
+                mark.marked_at,
+                str(mark.cash),
+                str(mark.equity_mid),
+                str(mark.equity_bid),
+                str(len(mark.positions)),
+                "yes" if mark.is_forward else "no",
+                mark.quote_source,
+            )
+        console.print(table)
+        console.print(
+            f"[dim]N={len(marks)} marks · mid ≠ bid liquidation · paper[/dim]"
+        )
+    except (ConfigurationError, DatabaseError) as exc:
+        _fail(str(exc))
+
+
+@paper_app.command("forward-demo")
+def paper_forward_demo_cmd(
+    ctx: typer.Context,
+    account_id: Annotated[str, typer.Option("--account-id")],
+    policy_id: Annotated[str, typer.Option("--policy-id")],
+    experiment: Annotated[
+        str, typer.Option("--experiment", help="Challenger id: M0, K0, or T0")
+    ] = "M0",
+    steps: Annotated[
+        int, typer.Option("--steps", help="Number of sequential issuance steps (>=2)")
+    ] = 8,
+) -> None:
+    """Accumulate multi-day synthetic forward paper results (labeled)."""
+    try:
+        from quantile_ledger.paper_forward import run_synthetic_forward_book
+
+        if steps < 2:
+            _fail("--steps must be >= 2")
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            result = run_synthetic_forward_book(
+                conn,
+                account_id=account_id,
+                policy_id=policy_id,
+                experiment_id=experiment.upper(),
+                steps=steps,
+            )
+        s = result.summary
+        mid = str(s.equity_mid) if s.equity_mid is not None else "n/a"
+        bid = str(s.equity_bid) if s.equity_bid is not None else "n/a"
+        console.print(
+            "[green]Forward paper demo[/green] "
+            f"experiment={result.experiment_id} forecasts={result.forecasts} "
+            f"issue_days={result.distinct_issue_days} "
+            f"decisions={result.decisions} entries={result.entries} "
+            f"exits={result.exits} flats={result.flats_recorded} "
+            f"marks={result.marks} equity_mid={mid} equity_bid={bid}"
+        )
+        console.print(
+            "[dim]All rows labeled is_synthetic=1 · is_forward=1 · "
+            "paper-only · no measurable edge claimed.[/dim]"
+        )
+    except (ConfigurationError, DatabaseError, QuantileLedgerError, ValueError) as exc:
+        _fail(str(exc))
 
 
 @paper_app.command("backfill")
@@ -1164,5 +1373,5 @@ def mechanical_history_cmd(ctx: typer.Context) -> None:
 
 @mechanical_app.command("stats")
 def mechanical_stats_cmd(ctx: typer.Context) -> None:
-    """Alias: show paper cash stats."""
+    """Alias: show paper cash / mid vs bid equity stats."""
     paper_stats_cmd(ctx)

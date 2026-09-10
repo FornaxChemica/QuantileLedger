@@ -27,7 +27,7 @@ from quantile_ledger.paper import (
 
 def test_schema_v4_paper_tables(tmp_path: Path) -> None:
     db = tmp_path / "p.db"
-    assert initialize_database(db) == SCHEMA_VERSION == 4
+    assert initialize_database(db) == SCHEMA_VERSION == 5
     with connection(db) as conn:
         tables = {
             row["name"]
@@ -37,6 +37,7 @@ def test_schema_v4_paper_tables(tmp_path: Path) -> None:
     assert "paper_decisions" in tables
     assert "paper_fills" in tables
     assert "paper_cash_ledger" in tables
+    assert "paper_marks" in tables
 
 
 def test_decide_long_flat_and_refuse_unfrozen() -> None:

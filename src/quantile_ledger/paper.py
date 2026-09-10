@@ -577,14 +577,336 @@ def open_share_quantity(conn: Any, account_id: str, ticker: str) -> Decimal:
     return qty
 
 
+def list_open_positions(conn: Any, account_id: str) -> dict[str, Decimal]:
+    """Return tickers with positive open share quantity."""
+    tickers = conn.execute(
+        """
+        SELECT DISTINCT ticker FROM paper_fills
+        WHERE account_id = ?
+        ORDER BY ticker
+        """,
+        (account_id,),
+    ).fetchall()
+    out: dict[str, Decimal] = {}
+    for row in tickers:
+        ticker = str(row["ticker"]).upper()
+        qty = open_share_quantity(conn, account_id, ticker)
+        if qty > 0:
+            out[ticker] = qty
+    return out
+
+
+@dataclass(frozen=True)
+class MarkEquity:
+    cash: Decimal
+    equity_mid: Decimal
+    equity_bid: Decimal
+    positions: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class PaperMark:
+    mark_id: str
+    account_id: str
+    marked_at: str
+    cash: Decimal
+    equity_mid: Decimal
+    equity_bid: Decimal
+    quote_source: str
+    data_quality: str
+    is_forward: bool
+    is_synthetic: bool
+    positions: tuple[dict[str, Any], ...]
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class PaperEquitySummary:
+    account_id: str
+    name: str
+    starting_cash: Decimal
+    cash: Decimal
+    equity_mid: Decimal | None
+    equity_bid: Decimal | None
+    mark_count: int
+    decision_count: int
+    forward_decision_count: int
+    fill_count: int
+    forward_fill_count: int
+    return_mid: Decimal | None
+    return_bid: Decimal | None
+
+
+def compute_mark_equity(
+    cash: Decimal,
+    positions: dict[str, Decimal],
+    quotes: dict[str, EquityQuote],
+) -> MarkEquity:
+    """Mid accounting equity vs bid liquidation equity (no mark-side slippage)."""
+    cash = _d(cash)
+    equity_mid = cash
+    equity_bid = cash
+    position_rows: list[dict[str, Any]] = []
+    for ticker, qty in sorted(positions.items()):
+        q = _d(qty)
+        if q <= 0:
+            continue
+        quote = quotes.get(ticker.upper())
+        if quote is None:
+            msg = f"missing quote for open position {ticker}"
+            raise PaperRiskRejectionError(msg)
+        if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
+            msg = f"invalid mark quote for {ticker}"
+            raise PaperRiskRejectionError(msg)
+        mid = quote.mid
+        bid = quote.bid
+        equity_mid += q * mid
+        equity_bid += q * bid
+        position_rows.append(
+            {
+                "ticker": ticker.upper(),
+                "quantity": _money(q),
+                "mid": _money(mid),
+                "bid": _money(bid),
+                "ask": _money(quote.ask),
+                "quote_time": quote.quote_time,
+            }
+        )
+    return MarkEquity(
+        cash=cash,
+        equity_mid=equity_mid,
+        equity_bid=equity_bid,
+        positions=tuple(position_rows),
+    )
+
+
+def insert_mark(
+    conn: Any,
+    *,
+    account_id: str,
+    marked_at: str,
+    mark: MarkEquity,
+    quote_source: str,
+    data_quality: str = "ok",
+    is_forward: bool = True,
+    is_synthetic: bool = False,
+    note: str | None = None,
+    mark_id: str | None = None,
+) -> PaperMark:
+    """Append an account-level mark snapshot (mid vs bid liquidation)."""
+    mid_row = PaperMark(
+        mark_id=mark_id or str(uuid.uuid4()),
+        account_id=account_id,
+        marked_at=marked_at,
+        cash=mark.cash,
+        equity_mid=mark.equity_mid,
+        equity_bid=mark.equity_bid,
+        quote_source=quote_source,
+        data_quality=data_quality,
+        is_forward=is_forward,
+        is_synthetic=is_synthetic,
+        positions=mark.positions,
+        note=note,
+    )
+    conn.execute(
+        """
+        INSERT INTO paper_marks (
+            mark_id, account_id, marked_at, cash, equity_mid, equity_bid,
+            quote_source, data_quality, is_forward, is_synthetic,
+            positions_json, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            mid_row.mark_id,
+            mid_row.account_id,
+            mid_row.marked_at,
+            _money(mid_row.cash),
+            _money(mid_row.equity_mid),
+            _money(mid_row.equity_bid),
+            mid_row.quote_source,
+            mid_row.data_quality,
+            1 if mid_row.is_forward else 0,
+            1 if mid_row.is_synthetic else 0,
+            json.dumps(list(mid_row.positions), sort_keys=True),
+            mid_row.note,
+        ),
+    )
+    return mid_row
+
+
+def list_marks(conn: Any, account_id: str) -> list[PaperMark]:
+    rows = conn.execute(
+        """
+        SELECT * FROM paper_marks
+        WHERE account_id = ?
+        ORDER BY marked_at ASC, rowid ASC
+        """,
+        (account_id,),
+    ).fetchall()
+    out: list[PaperMark] = []
+    for row in rows:
+        positions = tuple(json.loads(row["positions_json"]))
+        out.append(
+            PaperMark(
+                mark_id=row["mark_id"],
+                account_id=row["account_id"],
+                marked_at=row["marked_at"],
+                cash=_d(row["cash"]),
+                equity_mid=_d(row["equity_mid"]),
+                equity_bid=_d(row["equity_bid"]),
+                quote_source=row["quote_source"],
+                data_quality=row["data_quality"],
+                is_forward=bool(row["is_forward"]),
+                is_synthetic=bool(row["is_synthetic"]),
+                positions=positions,
+                note=row["note"],
+            )
+        )
+    return out
+
+
+def quotes_from_last_fills(
+    conn: Any, account_id: str, tickers: list[str]
+) -> dict[str, EquityQuote]:
+    """Build mark quotes from the most recent fill bid/ask per ticker."""
+    quotes: dict[str, EquityQuote] = {}
+    for ticker in tickers:
+        row = conn.execute(
+            """
+            SELECT bid, ask, mid, quote_time, data_quality
+            FROM paper_fills
+            WHERE account_id = ? AND ticker = ?
+              AND bid IS NOT NULL AND ask IS NOT NULL
+            ORDER BY fill_time DESC, rowid DESC
+            LIMIT 1
+            """,
+            (account_id, ticker.upper()),
+        ).fetchone()
+        if row is None:
+            msg = f"no fill quote available to mark {ticker}"
+            raise PaperRiskRejectionError(msg)
+        quotes[ticker.upper()] = EquityQuote(
+            ticker=ticker.upper(),
+            bid=_d(row["bid"]),
+            ask=_d(row["ask"]),
+            quote_time=row["quote_time"] or "",
+            quality=row["data_quality"] or "ok",
+        )
+    return quotes
+
+
+def record_account_mark(
+    conn: Any,
+    *,
+    account_id: str,
+    quotes: dict[str, EquityQuote],
+    marked_at: str | None = None,
+    quote_source: str,
+    data_quality: str = "ok",
+    is_forward: bool = True,
+    is_synthetic: bool = False,
+    note: str | None = None,
+) -> PaperMark:
+    """Mark open positions at provided quotes; cash-only books are allowed."""
+    cash = latest_cash_balance(conn, account_id)
+    positions = list_open_positions(conn, account_id)
+    mark = compute_mark_equity(cash, positions, quotes)
+    return insert_mark(
+        conn,
+        account_id=account_id,
+        marked_at=marked_at or to_iso_utc(utc_now()),
+        mark=mark,
+        quote_source=quote_source,
+        data_quality=data_quality,
+        is_forward=is_forward,
+        is_synthetic=is_synthetic,
+        note=note,
+    )
+
+
+def paper_equity_summary(conn: Any, account_id: str) -> PaperEquitySummary:
+    acct = conn.execute(
+        """
+        SELECT account_id, name, starting_cash FROM paper_accounts
+        WHERE account_id = ?
+        """,
+        (account_id,),
+    ).fetchone()
+    if acct is None:
+        msg = f"unknown paper account_id: {account_id}"
+        raise DatabaseError(msg)
+    starting = _d(acct["starting_cash"])
+    cash = latest_cash_balance(conn, account_id)
+    marks = list_marks(conn, account_id)
+    equity_mid: Decimal | None = None
+    equity_bid: Decimal | None = None
+    return_mid: Decimal | None = None
+    return_bid: Decimal | None = None
+    if marks:
+        equity_mid = marks[-1].equity_mid
+        equity_bid = marks[-1].equity_bid
+        if starting != 0:
+            return_mid = (equity_mid - starting) / starting
+            return_bid = (equity_bid - starting) / starting
+    decision_count = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM paper_decisions WHERE account_id = ?",
+            (account_id,),
+        ).fetchone()["n"]
+    )
+    forward_decision_count = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM paper_decisions
+            WHERE account_id = ? AND is_forward = 1
+            """,
+            (account_id,),
+        ).fetchone()["n"]
+    )
+    fill_count = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM paper_fills WHERE account_id = ?",
+            (account_id,),
+        ).fetchone()["n"]
+    )
+    forward_fill_count = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM paper_fills
+            WHERE account_id = ? AND is_forward = 1
+            """,
+            (account_id,),
+        ).fetchone()["n"]
+    )
+    return PaperEquitySummary(
+        account_id=account_id,
+        name=acct["name"],
+        starting_cash=starting,
+        cash=cash,
+        equity_mid=equity_mid,
+        equity_bid=equity_bid,
+        mark_count=len(marks),
+        decision_count=decision_count,
+        forward_decision_count=forward_decision_count,
+        fill_count=fill_count,
+        forward_fill_count=forward_fill_count,
+        return_mid=return_mid,
+        return_bid=return_bid,
+    )
+
+
 # Avoid exporting broken apply_fill.
 __all__ = [
     "EquityQuote",
+    "MarkEquity",
     "PaperDecision",
+    "PaperEquitySummary",
     "PaperFill",
+    "PaperMark",
     "UnderlyingPaperPolicy",
     "build_entry_fill",
     "build_exit_fill",
+    "compute_mark_equity",
     "decide_long_flat",
     "default_underlying_policy",
     "executable_buy_price",
@@ -592,10 +914,16 @@ __all__ = [
     "freeze_policy",
     "get_policy",
     "insert_decision",
+    "insert_mark",
     "insert_policy",
     "latest_cash_balance",
+    "list_marks",
+    "list_open_positions",
     "open_share_quantity",
+    "paper_equity_summary",
     "policy_from_row",
+    "quotes_from_last_fills",
+    "record_account_mark",
     "record_fill",
     "upsert_paper_account",
 ]

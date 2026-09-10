@@ -64,9 +64,21 @@ uv run ql experiment audit-k0
 uv run ql experiment audit-t0
 ```
 
+Paper long/flat (hypothetical; freeze policy first):
+
+```bash
+uv run ql paper account-init
+uv run ql paper policy-init && uv run ql paper policy-freeze <policy-id>
+uv run ql paper forward-demo --account-id <acct> --policy-id <id> --experiment M0
+uv run ql paper stats
+uv run ql paper equity --account-id <acct>
+uv run ql paper mark --account-id <acct> --from-last-fill
+```
+
 `ql demo load` uses **labeled synthetic** bars only (no network). K0 in the demo
 uses `FakeKronosSampler` (not pretrained Kronos weights). T0 is a local
-TFT-style model (not `pytorch-forecasting`).
+TFT-style model (not `pytorch-forecasting`). `ql paper forward-demo` walks
+multiple synthetic issuance days into a forward paper book with mid vs bid marks.
 
 For **real** Kronos (optional):
 

@@ -347,11 +347,6 @@ remote operations. The expected GitHub account is **FornaxChemica**.
   authentication configuration.
 - Never read or expose credential-helper contents, tokens, private keys, or the
   user's full private configuration.
-- Never use a bot identity, service account, alternate GitHub account, or
-  agent-authored identity.
-- Never use `--author` to override the user's configured identity.
-- Never add `Co-authored-by`, `Generated-by`, AI, Codex, Cursor, model, or agent
-  attribution to a commit.
 - Respect the user's existing signing configuration. Never bypass signing or
   verification to force a commit through.
 - Never run `git add`, `git add -A`, `git commit -a`, or otherwise change the

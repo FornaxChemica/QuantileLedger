@@ -11,8 +11,9 @@ from pathlib import Path
 from quantile_ledger.errors import DatabaseError
 from quantile_ledger.timeutil import to_iso_utc, utc_now
 
-SCHEMA_VERSION = 4
-SCHEMA_DESCRIPTION = "underlying long/flat paper policy, decisions, fills, cash"
+SCHEMA_VERSION = 5
+SCHEMA_DESCRIPTION = "paper mark-to-market mid vs bid liquidation equity marks"
+_V4_SCHEMA_DESCRIPTION = "underlying long/flat paper policy, decisions, fills, cash"
 BUSY_TIMEOUT_MS = 5000
 
 _V2_FORECAST_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -189,6 +190,27 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS paper_marks (
+            mark_id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL REFERENCES paper_accounts (account_id),
+            marked_at TEXT NOT NULL,
+            cash TEXT NOT NULL,
+            equity_mid TEXT NOT NULL,
+            equity_bid TEXT NOT NULL,
+            quote_source TEXT NOT NULL,
+            data_quality TEXT NOT NULL DEFAULT 'ok',
+            is_forward INTEGER NOT NULL DEFAULT 1 CHECK (is_forward IN (0, 1)),
+            is_synthetic INTEGER NOT NULL DEFAULT 0 CHECK (is_synthetic IN (0, 1)),
+            positions_json TEXT NOT NULL,
+            note TEXT
+        );
+        """
+    )
+
+
 def initialize_database(database_path: Path) -> int:
     """Create schema if needed and apply additive migrations. Idempotent."""
     with connection(database_path) as conn:
@@ -243,9 +265,21 @@ def initialize_database(database_path: Path) -> int:
                     VALUES (?, ?, ?)
                     ON CONFLICT(version) DO NOTHING
                     """,
-                    (4, to_iso_utc(utc_now()), SCHEMA_DESCRIPTION),
+                    (4, to_iso_utc(utc_now()), _V4_SCHEMA_DESCRIPTION),
                 )
                 current = 4
+
+            if current < 5:
+                _migrate_to_v5(conn)
+                conn.execute(
+                    """
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(version) DO NOTHING
+                    """,
+                    (5, to_iso_utc(utc_now()), SCHEMA_DESCRIPTION),
+                )
+                current = 5
 
             if current < SCHEMA_VERSION:
                 msg = (
