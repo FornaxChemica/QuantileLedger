@@ -19,9 +19,15 @@ QuantileLedger is a local-first research system for recording point-in-time
 probabilistic market forecasts, evaluating their walk-forward calibration, and
 tracking paper-only trading decisions.
 
-The product is the audit trail, not a claim of alpha. The expected result may
-be that a model has no measurable edge. Preserve that possibility in the code,
-metrics, tests, documentation, and interface.
+The product claim is:
+
+> QuantileLedger attempts to discover and convert probabilistic forecasting
+> skill into paper-trading alpha while making it difficult to fool ourselves.
+
+Pursuing alpha is allowed and expected. Promising live edge is not. The
+expected result may still be that a model has no measurable economic value
+after costs. Preserve that possibility in the code, metrics, tests,
+documentation, and interface.
 
 ## Instruction precedence
 
@@ -260,18 +266,24 @@ A violation is an error, not a warning.
 
 ## Paper-ledger rules
 
-- Long calls and long puts only unless the user explicitly changes the product
-  scope in a later design decision.
+- **Underlying long/flat first.** Paper equity decisions precede any options
+  book. Do not implement option order paths until the user confirms underlying
+  forward results show economic value after costs versus B1 (with adequate N).
+- When options are later enabled: long calls and long puts only unless the user
+  explicitly changes the product scope in a later design decision.
 - Use executable-side assumptions: ask for a paper purchase and bid for a paper
-  sale, plus configured costs.
+  sale, plus configured costs (spread, slippage, commission).
+- Freeze trading-policy configuration before accumulating forward paper results.
+  Do not mutate a frozen policy in place; version a new policy instead.
 - Keep midpoint accounting marks distinct from bid-side liquidation marks.
-- Store the quote, quote time, multiplier, fill source, slippage, fees, and data
-  quality used for every paper fill.
+- Store the quote, quote time, multiplier (1 for equity shares), fill source,
+  slippage, fees, and data quality used for every paper fill.
 - Never invent a fill when no valid quote exists.
-- Expiration backfill must use the underlying price at the defined historical
-  settlement time, not the spot when backfill happens to run.
+- Expiration backfill (options era) must use the underlying price at the defined
+  historical settlement time, not the spot when backfill happens to run.
 - Reconcile cash, fills, positions, and equity in tests.
-- A mechanical no-trade decision is data and must be recorded with its reason.
+- A mechanical no-trade / flat decision is data and must be recorded with its
+  reason.
 
 ## Python and code style
 

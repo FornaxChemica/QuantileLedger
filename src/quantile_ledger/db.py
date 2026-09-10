@@ -11,8 +11,8 @@ from pathlib import Path
 from quantile_ledger.errors import DatabaseError
 from quantile_ledger.timeutil import to_iso_utc, utc_now
 
-SCHEMA_VERSION = 3
-SCHEMA_DESCRIPTION = "artifacts table + experiment freeze support"
+SCHEMA_VERSION = 4
+SCHEMA_DESCRIPTION = "underlying long/flat paper policy, decisions, fills, cash"
 BUSY_TIMEOUT_MS = 5000
 
 _V2_FORECAST_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -116,6 +116,79 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE experiments ADD COLUMN frozen_at TEXT")
 
 
+_V3_SCHEMA_DESCRIPTION = "artifacts table + experiment freeze support"
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS paper_policies (
+            policy_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('draft', 'frozen', 'retired')),
+            instrument TEXT NOT NULL DEFAULT 'equity',
+            config_hash TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            frozen_at TEXT,
+            note TEXT,
+            UNIQUE (name, version)
+        );
+        CREATE TABLE IF NOT EXISTS paper_decisions (
+            decision_id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL REFERENCES paper_accounts (account_id),
+            policy_id TEXT NOT NULL REFERENCES paper_policies (policy_id),
+            policy_hash TEXT NOT NULL,
+            forecast_id TEXT REFERENCES forecasts (forecast_id),
+            experiment_id TEXT,
+            ticker TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('long', 'flat')),
+            reason TEXT NOT NULL,
+            is_forward INTEGER NOT NULL DEFAULT 1 CHECK (is_forward IN (0, 1)),
+            is_synthetic INTEGER NOT NULL DEFAULT 0 CHECK (is_synthetic IN (0, 1)),
+            metadata_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS paper_fills (
+            fill_id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL REFERENCES paper_accounts (account_id),
+            decision_id TEXT REFERENCES paper_decisions (decision_id),
+            policy_id TEXT NOT NULL REFERENCES paper_policies (policy_id),
+            ticker TEXT NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+            quantity TEXT NOT NULL,
+            fill_price TEXT NOT NULL,
+            bid TEXT,
+            ask TEXT,
+            mid TEXT,
+            half_spread_bps TEXT NOT NULL,
+            slippage_bps TEXT NOT NULL,
+            commission TEXT NOT NULL,
+            notional TEXT NOT NULL,
+            cash_delta TEXT NOT NULL,
+            quote_time TEXT,
+            fill_time TEXT NOT NULL,
+            fill_source TEXT NOT NULL,
+            data_quality TEXT NOT NULL DEFAULT 'ok',
+            is_forward INTEGER NOT NULL DEFAULT 1 CHECK (is_forward IN (0, 1)),
+            is_synthetic INTEGER NOT NULL DEFAULT 0 CHECK (is_synthetic IN (0, 1)),
+            metadata_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS paper_cash_ledger (
+            entry_id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL REFERENCES paper_accounts (account_id),
+            fill_id TEXT REFERENCES paper_fills (fill_id),
+            created_at TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            balance_after TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            note TEXT
+        );
+        """
+    )
+
+
 def initialize_database(database_path: Path) -> int:
     """Create schema if needed and apply additive migrations. Idempotent."""
     with connection(database_path) as conn:
@@ -158,9 +231,21 @@ def initialize_database(database_path: Path) -> int:
                     VALUES (?, ?, ?)
                     ON CONFLICT(version) DO NOTHING
                     """,
-                    (3, to_iso_utc(utc_now()), SCHEMA_DESCRIPTION),
+                    (3, to_iso_utc(utc_now()), _V3_SCHEMA_DESCRIPTION),
                 )
                 current = 3
+
+            if current < 4:
+                _migrate_to_v4(conn)
+                conn.execute(
+                    """
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(version) DO NOTHING
+                    """,
+                    (4, to_iso_utc(utc_now()), SCHEMA_DESCRIPTION),
+                )
+                current = 4
 
             if current < SCHEMA_VERSION:
                 msg = (

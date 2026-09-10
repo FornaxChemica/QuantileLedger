@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     paper_total_premium_limit: str = "5000.00"
     paper_commission_per_contract: str = "0.65"
     paper_slippage_per_contract: str = "0.05"
+    # Equity long/flat paper costs (Phase J1). Option keys unused until J2.
+    paper_equity_half_spread_bps: str = "5"
+    paper_equity_slippage_bps: str = "2"
+    paper_equity_commission_per_share: str = "0.005"
+    paper_equity_shares_per_entry: str = "10"
+    paper_equity_max_notional_per_trade: str = "5000.00"
+    paper_min_p50_log_return: str = "0.0010"
     mechanical_dte_min: int = 7
     mechanical_dte_max: int = 21
     min_metric_samples: int = 30

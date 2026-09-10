@@ -72,7 +72,9 @@ config_app = typer.Typer(help="Show or update non-secret local settings.")
 data_app = typer.Typer(help="Local data fetch/import status (Milestone 2+).")
 model_app = typer.Typer(help="Model registry commands.")
 forecast_app = typer.Typer(help="Forecast issuance and settlement.")
-paper_app = typer.Typer(help="Manual paper-only long options (Milestone 6).")
+paper_app = typer.Typer(
+    help="Paper-only underlying long/flat (options deferred until evidence)."
+)
 mechanical_app = typer.Typer(help="Mechanical paper benchmark (Milestone 7).")
 demo_app = typer.Typer(help="Deterministic offline synthetic demo.")
 experiment_app = typer.Typer(help="Research-matrix experiment registry.")
@@ -868,34 +870,238 @@ def forecast_backfill_cmd() -> None:
     _milestone_stub("ql forecast backfill", "Milestone 1")
 
 
+@paper_app.command("account-init")
+def paper_account_init_cmd(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Option("--name")] = "default",
+    cash: Annotated[str | None, typer.Option("--cash")] = None,
+) -> None:
+    """Create a paper equity account with starting cash."""
+    try:
+        from quantile_ledger.paper import upsert_paper_account
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        starting = cash or settings.paper_starting_cash
+        with connection(settings.database_path) as conn:
+            account_id = upsert_paper_account(
+                conn,
+                name=name,
+                starting_cash=starting,
+                note="paper equity account",
+            )
+        console.print(
+            f"[green]Paper account[/green] name={name} id={account_id} "
+            f"cash={starting} (hypothetical)"
+        )
+    except (ConfigurationError, DatabaseError, ValueError) as exc:
+        _fail(str(exc))
+
+
+@paper_app.command("policy-init")
+def paper_policy_init_cmd(ctx: typer.Context) -> None:
+    """Insert the default underlying long/flat policy as draft."""
+    try:
+        from dataclasses import replace
+
+        from quantile_ledger.paper import default_underlying_policy, insert_policy
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        base = default_underlying_policy()
+        policy = replace(
+            base,
+            half_spread_bps=settings.paper_equity_half_spread_bps,
+            slippage_bps=settings.paper_equity_slippage_bps,
+            commission_per_share=settings.paper_equity_commission_per_share,
+            shares_per_entry=settings.paper_equity_shares_per_entry,
+            max_notional_per_trade=settings.paper_equity_max_notional_per_trade,
+            min_p50_log_return=settings.paper_min_p50_log_return,
+            quote_max_age_seconds=settings.quote_max_age_seconds,
+        )
+        with connection(settings.database_path) as conn:
+            insert_policy(conn, policy)
+        console.print(
+            f"[green]Draft policy[/green] id={policy.policy_id} "
+            f"hash={policy.config_hash()[:12]} — freeze before forward tests"
+        )
+    except (ConfigurationError, DatabaseError, ValueError) as exc:
+        _fail(str(exc))
+
+
+@paper_app.command("policy-freeze")
+def paper_policy_freeze_cmd(
+    ctx: typer.Context,
+    policy_id: Annotated[str, typer.Argument()],
+) -> None:
+    """Freeze a draft paper policy (immutable thereafter)."""
+    try:
+        from quantile_ledger.paper import freeze_policy
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            policy = freeze_policy(conn, policy_id)
+        console.print(
+            f"[green]Frozen[/green] policy {policy.name}/v{policy.version} "
+            f"at {policy.frozen_at} hash={policy.config_hash()[:12]}"
+        )
+    except (ConfigurationError, DatabaseError, QuantileLedgerError) as exc:
+        _fail(str(exc))
+
+
+@paper_app.command("policy-show")
+def paper_policy_show_cmd(
+    ctx: typer.Context,
+    policy_id: Annotated[str, typer.Argument()],
+) -> None:
+    """Show a paper policy configuration."""
+    try:
+        from quantile_ledger.paper import get_policy
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            policy = get_policy(conn, policy_id)
+        console.print_json(
+            json.dumps(
+                {
+                    "policy_id": policy.policy_id,
+                    "name": policy.name,
+                    "version": policy.version,
+                    "status": policy.status,
+                    "config_hash": policy.config_hash(),
+                    "frozen_at": policy.frozen_at,
+                    "config": policy.config_payload(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    except (ConfigurationError, DatabaseError) as exc:
+        _fail(str(exc))
+
+
 @paper_app.command("buy")
 def paper_buy_cmd() -> None:
-    _milestone_stub("ql paper buy", "Milestone 6")
+    """Options paper buy — blocked until underlying evidence (Phase J2)."""
+    _fail(
+        "Options paper trading is blocked until underlying long/flat forward "
+        "results show economic value after costs vs B1. Use equity policy path."
+    )
 
 
 @paper_app.command("positions")
-def paper_positions_cmd() -> None:
-    _milestone_stub("ql paper positions", "Milestone 6")
+def paper_positions_cmd(ctx: typer.Context) -> None:
+    """Show open paper equity share quantities by ticker."""
+    try:
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            accounts = conn.execute(
+                "SELECT account_id, name FROM paper_accounts ORDER BY name"
+            ).fetchall()
+            if not accounts:
+                console.print("[yellow]No paper accounts.[/yellow]")
+                return
+            from quantile_ledger.paper import open_share_quantity
+
+            for acct in accounts:
+                tickers = conn.execute(
+                    """
+                    SELECT DISTINCT ticker FROM paper_fills
+                    WHERE account_id = ? ORDER BY ticker
+                    """,
+                    (acct["account_id"],),
+                ).fetchall()
+                console.print(
+                    f"[bold]{acct['name']}[/bold] ({acct['account_id'][:8]}…)"
+                )
+                if not tickers:
+                    console.print("  (no fills)")
+                    continue
+                for trow in tickers:
+                    qty = open_share_quantity(conn, acct["account_id"], trow["ticker"])
+                    console.print(f"  {trow['ticker']}: {qty} shares (paper)")
+    except (ConfigurationError, DatabaseError) as exc:
+        _fail(str(exc))
 
 
 @paper_app.command("history")
-def paper_history_cmd() -> None:
-    _milestone_stub("ql paper history", "Milestone 6")
+def paper_history_cmd(ctx: typer.Context) -> None:
+    """List recent paper decisions (forward flag included)."""
+    try:
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT decided_at, ticker, action, reason, experiment_id,
+                       is_forward, is_synthetic
+                FROM paper_decisions
+                ORDER BY decided_at DESC, rowid DESC
+                LIMIT 50
+                """
+            ).fetchall()
+        if not rows:
+            console.print("[yellow]No paper decisions yet.[/yellow]")
+            return
+        table = Table(title="Paper decisions (hypothetical)")
+        table.add_column("When")
+        table.add_column("Ticker")
+        table.add_column("Action")
+        table.add_column("Exp")
+        table.add_column("Fwd")
+        table.add_column("Reason")
+        for row in rows:
+            table.add_row(
+                row["decided_at"],
+                row["ticker"],
+                row["action"],
+                row["experiment_id"] or "",
+                "yes" if row["is_forward"] else "no",
+                row["reason"][:60],
+            )
+        console.print(table)
+    except (ConfigurationError, DatabaseError, sqlite3.Error) as exc:
+        _fail(str(exc))
 
 
 @paper_app.command("stats")
-def paper_stats_cmd() -> None:
-    _milestone_stub("ql paper stats", "Milestone 6")
+def paper_stats_cmd(ctx: typer.Context) -> None:
+    """Show paper cash balances (hypothetical)."""
+    try:
+        from quantile_ledger.paper import latest_cash_balance
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            accounts = conn.execute(
+                "SELECT account_id, name, starting_cash FROM paper_accounts"
+            ).fetchall()
+            if not accounts:
+                console.print("[yellow]No paper accounts.[/yellow]")
+                return
+            for acct in accounts:
+                bal = latest_cash_balance(conn, acct["account_id"])
+                console.print(
+                    f"{acct['name']}: cash={bal} "
+                    f"(start={acct['starting_cash']}) [dim]paper[/dim]"
+                )
+    except (ConfigurationError, DatabaseError) as exc:
+        _fail(str(exc))
 
 
 @paper_app.command("mark")
 def paper_mark_cmd() -> None:
-    _milestone_stub("ql paper mark", "Milestone 6")
+    _milestone_stub("ql paper mark", "Phase J1 marks")
 
 
 @paper_app.command("backfill")
 def paper_backfill_cmd() -> None:
-    _milestone_stub("ql paper backfill", "Milestone 6")
+    _fail(
+        "Options expiration backfill is Phase J2 (blocked until underlying evidence)."
+    )
 
 
 @mechanical_app.command("run")

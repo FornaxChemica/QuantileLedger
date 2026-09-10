@@ -1,19 +1,18 @@
 # QuantileLedger
 
-> QuantileLedger records probabilistic market forecasts before their outcomes
-> are known, evaluates their calibration walk-forward, and tracks paper
-> strategies without claiming an edge. Its expected result may be that the
-> tested models do not outperform simple baselines; that negative result is
-> part of the product, not a failure to be hidden.
+> QuantileLedger attempts to discover and convert probabilistic forecasting
+> skill into paper-trading alpha while making it difficult to fool ourselves.
+> Negative and inconclusive results are part of the product, not failures to hide.
 
 **Tagline:** A point-in-time ledger for probabilistic forecasts, calibration,
-and paper trades.
+    and paper trades.
 
 ## Naming note
 
 - **Foundation Milestone 0** — package/CLI/schema bootstrap (complete).
 - **Research experiment `M0`** — MambaQuantile, market-only candidate (implemented
   locally as a diagonal selective SSM + pinball; not the CUDA `mamba-ssm` package).
+- **K0 / T0** — Kronos and TFT-style **challengers** compared to baseline **B1**.
 
 These IDs are intentionally different.
 
@@ -24,13 +23,15 @@ A **local-first** research tool for US equities/ETFs that:
 - records immutable point-in-time quantile forecasts under a common contract;
 - settles them with honest walk-forward rules;
 - scores calibration **together with** interval sharpness;
-- compares models to simple baselines (especially **B1**) on identical outcomes;
-- tracks **paper-only** long-option decisions (manual and mechanical; later).
+- compares challenger models to simple baselines (especially **B1**) on identical outcomes;
+- tracks **paper-only** trading — starting with **underlying long/flat**, with
+  conservative spreads, slippage, and costs; options only after underlying
+  economic-value evidence.
 
 ## What it is not
 
 - Not a live trading system (no broker SDKs, credentials, or order routing).
-- Not a claim of profitable market alpha.
+- Not a promise of live profitable alpha (paper results can be negative).
 - Not a cloud service (no hosted DB, CI, telemetry, or deployed dashboard).
 - Not an authenticated market-data client (no API keys).
 

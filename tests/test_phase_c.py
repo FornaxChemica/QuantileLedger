@@ -22,16 +22,18 @@ from quantile_ledger.mamba_quantile import train_m0_model
 from quantile_ledger.synthetic import make_synthetic_hourly_closes
 
 
-def test_schema_migrates_to_v3(tmp_path: Path) -> None:
+def test_schema_migrates_to_v4(tmp_path: Path) -> None:
     db = tmp_path / "t.db"
     version = initialize_database(db)
-    assert version == SCHEMA_VERSION == 3
+    assert version == SCHEMA_VERSION == 4
     with connection(db) as conn:
         tables = {
             r["name"]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert "artifacts" in tables
+        assert "paper_policies" in tables
+        assert "paper_fills" in tables
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(experiments)")}
         assert "frozen_at" in cols
 
