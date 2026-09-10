@@ -75,7 +75,9 @@ forecast_app = typer.Typer(help="Forecast issuance and settlement.")
 paper_app = typer.Typer(
     help="Paper-only underlying long/flat (options deferred until evidence)."
 )
-mechanical_app = typer.Typer(help="Mechanical paper benchmark (Milestone 7).")
+mechanical_app = typer.Typer(
+    help="Mechanical equity long/flat paper runner (frozen policy required)."
+)
 demo_app = typer.Typer(help="Deterministic offline synthetic demo.")
 experiment_app = typer.Typer(help="Research-matrix experiment registry.")
 
@@ -1105,20 +1107,62 @@ def paper_backfill_cmd() -> None:
 
 
 @mechanical_app.command("run")
-def mechanical_run_cmd() -> None:
-    _milestone_stub("ql mechanical run", "Milestone 7")
+def mechanical_run_cmd(
+    ctx: typer.Context,
+    account_id: Annotated[str, typer.Option("--account-id")],
+    policy_id: Annotated[str, typer.Option("--policy-id")],
+    experiment: Annotated[
+        str, typer.Option("--experiment", help="Challenger id: M0, K0, or T0")
+    ] = "M0",
+    exploratory: Annotated[
+        bool,
+        typer.Option(
+            "--exploratory",
+            help="Mark decisions as not forward (is_forward=0).",
+        ),
+    ] = False,
+) -> None:
+    """Run long/flat decisions on undecided settled challenger forecasts."""
+    try:
+        from quantile_ledger.mechanical import run_mechanical_underlying
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        eid = experiment.upper()
+        with connection(settings.database_path) as conn:
+            result = run_mechanical_underlying(
+                conn,
+                account_id=account_id,
+                policy_id=policy_id,
+                experiment_id=eid,
+                is_forward=not exploratory,
+            )
+        console.print(
+            "[green]Mechanical run[/green] "
+            f"experiment={eid} decisions={result.decisions} "
+            f"entries={result.entries} exits={result.exits} "
+            f"flat_holds={result.flats_recorded} "
+            f"forward={'no' if exploratory else 'yes'}"
+        )
+        if result.cash_after is not None:
+            console.print(f"cash_after={result.cash_after} [dim]paper[/dim]")
+    except (ConfigurationError, DatabaseError, QuantileLedgerError) as exc:
+        _fail(str(exc))
 
 
 @mechanical_app.command("positions")
-def mechanical_positions_cmd() -> None:
-    _milestone_stub("ql mechanical positions", "Milestone 7")
+def mechanical_positions_cmd(ctx: typer.Context) -> None:
+    """Alias: show paper equity positions."""
+    paper_positions_cmd(ctx)
 
 
 @mechanical_app.command("history")
-def mechanical_history_cmd() -> None:
-    _milestone_stub("ql mechanical history", "Milestone 7")
+def mechanical_history_cmd(ctx: typer.Context) -> None:
+    """Alias: show paper decision history."""
+    paper_history_cmd(ctx)
 
 
 @mechanical_app.command("stats")
-def mechanical_stats_cmd() -> None:
-    _milestone_stub("ql mechanical stats", "Milestone 7")
+def mechanical_stats_cmd(ctx: typer.Context) -> None:
+    """Alias: show paper cash stats."""
+    paper_stats_cmd(ctx)

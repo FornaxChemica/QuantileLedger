@@ -107,7 +107,7 @@ Gate: paper book uses **equity long/flat only**. Options stay unimplemented.
 - [x] CLI: `ql paper policy-init|policy-freeze|policy-show`, account-init, history/stats
 - [x] Forward flag on decisions/fills (`is_forward`)
 - [x] Docs/AGENTS/TASKS/README: options deferred until underlying evidence
-- [ ] Mechanical runner linking settled challenger forecasts → decide/fill
+- [x] Mechanical runner linking settled challenger forecasts → decide/fill
 - [ ] Mark-to-market (mid vs bid liquidation) + equity curve report
 - [ ] Accumulate multi-day genuinely forward paper results (beyond unit tests)
 
