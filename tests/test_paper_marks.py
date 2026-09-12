@@ -23,7 +23,7 @@ from quantile_ledger.paper_forward import run_synthetic_forward_book
 
 def test_schema_v5_paper_marks(tmp_path: Path) -> None:
     db = tmp_path / "m.db"
-    assert initialize_database(db) == SCHEMA_VERSION == 5
+    assert initialize_database(db) == SCHEMA_VERSION == 6
     with connection(db) as conn:
         tables = {
             row["name"]

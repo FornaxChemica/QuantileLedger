@@ -32,10 +32,11 @@ from quantile_ledger.errors import (
     ConfigurationError,
     DatabaseError,
     InsufficientDataError,
+    MalformedInputError,
     ModelUnavailableError,
     QuantileLedgerError,
 )
-from quantile_ledger.experiments import K0, M0, T0, get_experiment, list_experiments
+from quantile_ledger.experiments import K0, M0, N0, T0, get_experiment, list_experiments
 from quantile_ledger.forecast_store import (
     freeze_experiment,
     get_forecast_provenance,
@@ -70,6 +71,9 @@ app = typer.Typer(
 watch_app = typer.Typer(help="Manage the local equity/ETF watchlist.")
 config_app = typer.Typer(help="Show or update non-secret local settings.")
 data_app = typer.Typer(help="Local data fetch/import status (Milestone 2+).")
+sentiment_app = typer.Typer(
+    help="Local FinBERT / fake news sentiment (missing ≠ neutral)."
+)
 model_app = typer.Typer(help="Model registry commands.")
 forecast_app = typer.Typer(help="Forecast issuance and settlement.")
 paper_app = typer.Typer(
@@ -84,6 +88,7 @@ experiment_app = typer.Typer(help="Research-matrix experiment registry.")
 app.add_typer(watch_app, name="watch")
 app.add_typer(config_app, name="config")
 app.add_typer(data_app, name="data")
+app.add_typer(sentiment_app, name="sentiment")
 app.add_typer(model_app, name="model")
 app.add_typer(forecast_app, name="forecast")
 app.add_typer(paper_app, name="paper")
@@ -275,7 +280,7 @@ def experiment_list_cmd(ctx: typer.Context) -> None:
     console.print(table)
     console.print(
         "[dim]Note: foundation build 'Milestone 0' ≠ research experiment M0 "
-        "(MambaQuantile). K0 = Kronos; T0 = local TFT-style.[/dim]"
+        "(MambaQuantile). K0 = Kronos; T0 = local TFT-style; N0 = news/FinBERT.[/dim]"
     )
     _ = ctx
 
@@ -382,6 +387,50 @@ def experiment_audit_t0_cmd() -> None:
     console.print(
         "status: candidate (local gated-attention TFT-style; not pytorch-forecasting)"
     )
+
+
+@experiment_app.command("audit-n0")
+def experiment_audit_n0_cmd() -> None:
+    """Print the N0 (news / FinBERT context) audit checklist status."""
+    console.print("[bold]N0 audit (news FinBERT context ablation)[/bold]")
+    console.print(f"experiment_id: {N0.experiment_id}")
+    console.print(f"version: {N0.version}")
+    console.print(f"config_hash: {N0.config_hash()}")
+    console.print(f"feature_set: {N0.feature_set}/{N0.feature_version}")
+    console.print(f"pit_rules: {N0.hyperparameters.get('pit_rules')}")
+    console.print(f"missing_sentiment: {N0.hyperparameters.get('missing_sentiment')}")
+    console.print(
+        "scorers: fake_finbert_v1 (offline default); "
+        "ProsusAI/finbert optional via `uv sync --extra ml` + fetch-n0"
+    )
+    console.print("status: draft — context builder only; Phase G wires model ablations")
+
+
+@experiment_app.command("fetch-n0")
+def experiment_fetch_n0_cmd(
+    ctx: typer.Context,
+    force: Annotated[
+        bool, typer.Option("--force", help="Re-download even if cache exists")
+    ] = False,
+) -> None:
+    """Download ProsusAI/finbert weights once into local .ql cache (no API key)."""
+    try:
+        from quantile_ledger.sentiment import fetch_finbert_weights, finbert_local_dir
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        settings.ensure_directories()
+        console.print(
+            "[bold]Fetching FinBERT (public, no API key) into local cache…[/bold]"
+        )
+        path = fetch_finbert_weights(settings.data_dir, force=force)
+        console.print(f"  local_dir: {finbert_local_dir(settings.data_dir).name}/…")
+        console.print(f"[green]Ready[/green] — weights under {path.name}/ (relative)")
+        console.print(
+            "[dim]Default scoring still uses FakeFinBERT unless "
+            "`ql sentiment score --backend finbert`.[/dim]"
+        )
+    except (ConfigurationError, ModelUnavailableError, OSError) as exc:
+        _fail(str(exc))
 
 
 @experiment_app.command("fetch-k0")
@@ -824,14 +873,151 @@ def data_fetch_cmd(
 
 
 @data_app.command("import-news")
-def data_import_news_cmd(path: Annotated[Path, typer.Argument()]) -> None:
-    _ = path
-    _milestone_stub("ql data import-news", "Milestone 2")
+def data_import_news_cmd(
+    ctx: typer.Context,
+    path: Annotated[Path, typer.Argument(help="Local JSON or JSONL news file.")],
+    synthetic: Annotated[
+        bool,
+        typer.Option(
+            "--synthetic",
+            help="Force is_synthetic=1 on imported rows (demo/fixtures).",
+        ),
+    ] = False,
+) -> None:
+    """Import local news JSON/JSONL (no network). Enforces ingest ≥ publish."""
+    try:
+        from quantile_ledger.forecast_store import upsert_experiment
+        from quantile_ledger.news import import_news_file
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        initialize_database(settings.database_path)
+        with connection(settings.database_path) as conn:
+            upsert_experiment(conn, N0)
+            result = import_news_file(conn, path, force_synthetic=synthetic)
+        console.print(
+            "[green]Imported news[/green] "
+            f"inserted={result.inserted} "
+            f"duplicates={result.skipped_duplicate} "
+            f"rows={result.total_rows}"
+        )
+        console.print(
+            "[dim]Point-in-time: eligible only when published_at and "
+            "ingested_at ≤ issued_at. Missing ≠ neutral.[/dim]"
+        )
+    except (
+        ConfigurationError,
+        DatabaseError,
+        MalformedInputError,
+        OSError,
+    ) as exc:
+        _fail(str(exc))
 
 
 @data_app.command("status")
-def data_status_cmd() -> None:
-    _milestone_stub("ql data status", "Milestone 2")
+def data_status_cmd(ctx: typer.Context) -> None:
+    """Show local news / sentiment row counts (no private paths)."""
+    try:
+        from quantile_ledger.news import news_counts
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        initialize_database(settings.database_path)
+        with connection(settings.database_path) as conn:
+            counts = news_counts(conn)
+        console.print(
+            f"news_items={counts['news_items']} "
+            f"news_sentiment={counts['news_sentiment']}"
+        )
+    except (ConfigurationError, DatabaseError) as exc:
+        _fail(str(exc))
+
+
+@sentiment_app.command("score")
+def sentiment_score_cmd(
+    ctx: typer.Context,
+    backend: Annotated[
+        str,
+        typer.Option("--backend", help="fake (default) or finbert"),
+    ] = "fake",
+    ticker: Annotated[str | None, typer.Option("--ticker")] = None,
+    limit: Annotated[int | None, typer.Option("--limit")] = None,
+) -> None:
+    """Score unscored local headlines (FakeFinBERT or optional ProsusAI/finbert)."""
+    try:
+        from quantile_ledger.sentiment import resolve_scorer, score_unscored_news
+
+        be = backend.lower().strip()
+        if be not in {"fake", "finbert"}:
+            _fail("--backend must be fake or finbert")
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        initialize_database(settings.database_path)
+        scorer = resolve_scorer(backend=be, data_dir=settings.data_dir)  # type: ignore[arg-type]
+        with connection(settings.database_path) as conn:
+            result = score_unscored_news(
+                conn, scorer=scorer, ticker=ticker, limit=limit
+            )
+        console.print(
+            "[green]Sentiment score[/green] "
+            f"backend={be} scorer={scorer.scorer_id} "
+            f"scored={result['scored']} failed={result['failed']} "
+            f"considered={result['considered']}"
+        )
+        if be == "fake":
+            console.print("[dim]FakeFinBERT is synthetic lexicon — not ProsusAI.[/dim]")
+    except (ConfigurationError, DatabaseError, ModelUnavailableError) as exc:
+        _fail(str(exc))
+
+
+@sentiment_app.command("context")
+def sentiment_context_cmd(
+    ctx: typer.Context,
+    ticker: Annotated[str, typer.Option("--ticker")],
+    issued_at: Annotated[
+        str, typer.Option("--issued-at", help="Forecast issuance UTC ISO timestamp")
+    ],
+    scorer: Annotated[
+        str,
+        typer.Option("--scorer", help="Scorer id (default fake_finbert_v1)"),
+    ] = "fake_finbert_v1",
+) -> None:
+    """Show PIT sentiment context for a ticker (missing ≠ neutral)."""
+    try:
+        from quantile_ledger.sentiment import build_sentiment_context
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        initialize_database(settings.database_path)
+        with connection(settings.database_path) as conn:
+            ctx_row = build_sentiment_context(
+                conn,
+                ticker=ticker,
+                issued_at=issued_at,
+                scorer_id=scorer,
+            )
+        console.print(json.dumps(ctx_row.as_dict(), indent=2, sort_keys=True))
+        if ctx_row.status == "missing":
+            console.print(
+                "[yellow]status=missing[/yellow] — no eligible news; "
+                "do not treat as neutral."
+            )
+        elif ctx_row.status == "unscored":
+            console.print(
+                "[yellow]status=unscored[/yellow] — news present but no scores; "
+                "run `ql sentiment score`."
+            )
+        elif (
+            ctx_row.n_scored is not None
+            and ctx_row.n_items > 0
+            and ctx_row.n_scored < ctx_row.n_items
+        ):
+            console.print(
+                f"[yellow]partial[/yellow] — scored {ctx_row.n_scored}/"
+                f"{ctx_row.n_items} eligible items."
+            )
+    except (ConfigurationError, DatabaseError, MalformedInputError) as exc:
+        _fail(str(exc))
 
 
 @model_app.command("list")

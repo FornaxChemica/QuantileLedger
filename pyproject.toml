@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ml = [
-  # Phase D K0 (Kronos). Optional; core tests stay offline without this extra.
+  # Phase D K0 (Kronos) + Phase F FinBERT. Optional; core tests stay offline.
   "torch>=2.0.0",
   "pandas>=2.0.0",
   "numpy>=1.26.0",
@@ -39,6 +39,7 @@ ml = [
   "huggingface_hub>=0.23.0",
   "safetensors>=0.4.0",
   "tqdm>=4.66.0",
+  "transformers>=4.40.0",
 ]
 dashboard = [
   # Declared in Milestone 8 (Streamlit / Plotly). Kept empty in M0.

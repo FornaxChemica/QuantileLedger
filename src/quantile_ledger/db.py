@@ -11,8 +11,9 @@ from pathlib import Path
 from quantile_ledger.errors import DatabaseError
 from quantile_ledger.timeutil import to_iso_utc, utc_now
 
-SCHEMA_VERSION = 5
-SCHEMA_DESCRIPTION = "paper mark-to-market mid vs bid liquidation equity marks"
+SCHEMA_VERSION = 6
+SCHEMA_DESCRIPTION = "news sentiment scores for FinBERT / N0 ablations"
+_V5_SCHEMA_DESCRIPTION = "paper mark-to-market mid vs bid liquidation equity marks"
 _V4_SCHEMA_DESCRIPTION = "underlying long/flat paper policy, decisions, fills, cash"
 BUSY_TIMEOUT_MS = 5000
 
@@ -211,6 +212,30 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS news_sentiment (
+            sentiment_id TEXT PRIMARY KEY,
+            news_id TEXT NOT NULL REFERENCES news_items (news_id),
+            scorer_id TEXT NOT NULL,
+            scored_at TEXT NOT NULL,
+            label TEXT NOT NULL CHECK (
+                label IN ('positive', 'negative', 'neutral', 'failed')
+            ),
+            score_positive TEXT,
+            score_negative TEXT,
+            score_neutral TEXT,
+            status TEXT NOT NULL CHECK (status IN ('scored', 'failed')),
+            is_synthetic INTEGER NOT NULL DEFAULT 0 CHECK (is_synthetic IN (0, 1)),
+            model_ref TEXT,
+            metadata_json TEXT,
+            UNIQUE (news_id, scorer_id)
+        );
+        """
+    )
+
+
 def initialize_database(database_path: Path) -> int:
     """Create schema if needed and apply additive migrations. Idempotent."""
     with connection(database_path) as conn:
@@ -277,9 +302,21 @@ def initialize_database(database_path: Path) -> int:
                     VALUES (?, ?, ?)
                     ON CONFLICT(version) DO NOTHING
                     """,
-                    (5, to_iso_utc(utc_now()), SCHEMA_DESCRIPTION),
+                    (5, to_iso_utc(utc_now()), _V5_SCHEMA_DESCRIPTION),
                 )
                 current = 5
+
+            if current < 6:
+                _migrate_to_v6(conn)
+                conn.execute(
+                    """
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(version) DO NOTHING
+                    """,
+                    (6, to_iso_utc(utc_now()), SCHEMA_DESCRIPTION),
+                )
+                current = 6
 
             if current < SCHEMA_VERSION:
                 msg = (

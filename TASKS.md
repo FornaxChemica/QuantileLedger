@@ -17,7 +17,7 @@ sample size `N`.
 - Research **experiment M0** = MambaQuantile market-only (Phase A).
 - **K0 / T0** = Kronos and TFT-style **challengers** vs primary baseline **B1**.
 
-## Audit snapshot (2026-09-09)
+## Audit snapshot (2026-09-11)
 
 | Area | Status |
 |------|--------|
@@ -29,7 +29,7 @@ sample size `N`.
 | Underlying long/flat paper policy | **Done** (J1: schema v5 marks + mechanical + forward-demo) |
 | Policy freeze before forward paper book | Done (API + CLI + mechanical runner) |
 | Forward paper P&L accumulation | Done (synthetic multi-day forward-demo + mid/bid equity curve) |
-| News / FinBERT controlled ablations | Not started |
+| News / FinBERT controlled ablations | **Done** (Phase F infra; Phase G wires into model variants) |
 | Options paper trading | **Blocked** until underlying economic-value evidence |
 | Streamlit dashboard / nightly | Not started |
 
@@ -113,14 +113,15 @@ Gate: paper book uses **equity long/flat only**. Options stay unimplemented.
 
 ## Phase F — Local news + FinBERT (ablations)
 
-- [ ] Import path + point-in-time cutoffs (`published_at` / `ingested_at` ≤ `issued_at`)
-- [ ] Missing sentiment ≠ neutral
-- [ ] Controlled ablations only (N0 etc.); no silent feature leakage
+- [x] Import path + point-in-time cutoffs (`published_at` / `ingested_at` ≤ `issued_at`)
+- [x] Missing sentiment ≠ neutral
+- [x] Controlled ablations only (N0 etc.); no silent feature leakage
 
 ## Phase G — Ablations T1/T2/M1/N0
 
 - [ ] Same contract / issuance / outcome pairing as T0/M0/K0
 - [ ] Coverage always with width + N
+- [ ] Wire N0 news context into challenger forecast variants (not silent merge)
 
 ## Phase H — Calibration + regimes
 

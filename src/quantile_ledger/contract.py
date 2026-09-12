@@ -12,6 +12,7 @@ from quantile_ledger.errors import ForecastValidationError
 TARGET_LOG_RETURN = "log_return"
 FORECAST_SPACE_RETURN: Literal["return"] = "return"
 FEATURE_SET_MARKET_ONLY = "market_only"
+FEATURE_SET_MARKET_PLUS_NEWS = "market_plus_news"
 FEATURE_VERSION_V1 = "v1"
 
 DEFAULT_QUANTILES: tuple[float, ...] = (0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95)

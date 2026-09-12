@@ -10,6 +10,7 @@ from typing import Any, Literal
 from quantile_ledger.contract import (
     DEFAULT_QUANTILES,
     FEATURE_SET_MARKET_ONLY,
+    FEATURE_SET_MARKET_PLUS_NEWS,
     FEATURE_VERSION_V1,
     TARGET_LOG_RETURN,
 )
@@ -176,12 +177,40 @@ T0 = ExperimentSpec(
     label="exploratory",
 )
 
+N0 = ExperimentSpec(
+    experiment_id="N0",
+    name="news_finbert_context_ablation",
+    version="1",
+    model_family="finbert_context",
+    feature_set=FEATURE_SET_MARKET_PLUS_NEWS,
+    feature_version=FEATURE_VERSION_V1,
+    target_definition=TARGET_LOG_RETURN,
+    status="draft",
+    purpose=(
+        "Controlled news ablation: local FinBERT (or fake lexicon) headline "
+        "scores under point-in-time published_at/ingested_at cutoffs. "
+        "Missing sentiment is never treated as neutral. Does not itself issue "
+        "market forecasts; pairs with challenger ablations in Phase G."
+    ),
+    quantiles=DEFAULT_QUANTILES,
+    horizons_hours=DEFAULT_HORIZONS,
+    hyperparameters={
+        "scorer_fake": "fake_finbert_v1",
+        "scorer_real": "prosusai_finbert",
+        "model_id": "ProsusAI/finbert",
+        "missing_sentiment": "explicit_missing_not_neutral",
+        "pit_rules": ["published_at<=issued_at", "ingested_at<=issued_at"],
+    },
+    label="exploratory",
+)
+
 REGISTRY: dict[str, ExperimentSpec] = {
     B0.experiment_id: B0,
     B1.experiment_id: B1,
     M0.experiment_id: M0,
     K0.experiment_id: K0,
     T0.experiment_id: T0,
+    N0.experiment_id: N0,
 }
 
 

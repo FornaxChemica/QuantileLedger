@@ -200,6 +200,25 @@ CREATE TABLE IF NOT EXISTS news_items (
     UNIQUE (dedupe_key)
 );
 
+-- Phase F: FinBERT / controlled news sentiment (missing ≠ neutral).
+CREATE TABLE IF NOT EXISTS news_sentiment (
+    sentiment_id TEXT PRIMARY KEY,
+    news_id TEXT NOT NULL REFERENCES news_items (news_id),
+    scorer_id TEXT NOT NULL,
+    scored_at TEXT NOT NULL,
+    label TEXT NOT NULL CHECK (
+        label IN ('positive', 'negative', 'neutral', 'failed')
+    ),
+    score_positive TEXT,
+    score_negative TEXT,
+    score_neutral TEXT,
+    status TEXT NOT NULL CHECK (status IN ('scored', 'failed')),
+    is_synthetic INTEGER NOT NULL DEFAULT 0 CHECK (is_synthetic IN (0, 1)),
+    model_ref TEXT,
+    metadata_json TEXT,
+    UNIQUE (news_id, scorer_id)
+);
+
 CREATE TABLE IF NOT EXISTS paper_accounts (
     account_id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,

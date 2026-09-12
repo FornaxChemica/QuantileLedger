@@ -95,6 +95,7 @@ def optional_dependency_status() -> dict[str, str]:
     import importlib.util
 
     from quantile_ledger.kronos_quantile import kronos_optional_status
+    from quantile_ledger.sentiment import finbert_optional_status
 
     names = (
         "torch",
@@ -113,4 +114,5 @@ def optional_dependency_status() -> dict[str, str]:
     # K0 fake adapter is always available; real Kronos stack is optional.
     status.update(kronos_optional_status())
     status["tft_local_adapter"] = "available"
+    status.update(finbert_optional_status())
     return status

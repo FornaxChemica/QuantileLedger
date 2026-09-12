@@ -44,7 +44,8 @@ A **local-first** research tool for US equities/ETFs that:
 | M0 | MambaQuantile (local selective SSM) | Market only | Implemented (candidate) |
 | K0 | Kronos sample → empirical quantiles | Market only | Implemented (fake in demo; real via `[ml]` + `fetch-k0`) |
 | T0 | TFT-style gated attention quantiles | Market only | Implemented (local; not pytorch-forecasting) |
-| news / E0 | FinBERT, ensemble | — | Not implemented |
+| N0 | FinBERT news context ablation | Market + news | Implemented (fake default; real via `[ml]` + `fetch-n0`) |
+| E0 | Ensemble | — | Not implemented |
 
 Target convention: cumulative **log return** `r = log(P_target / P_issue)`,
 with price quantiles `P * exp(r)`.
@@ -79,6 +80,18 @@ uv run ql paper mark --account-id <acct> --from-last-fill
 uses `FakeKronosSampler` (not pretrained Kronos weights). T0 is a local
 TFT-style model (not `pytorch-forecasting`). `ql paper forward-demo` walks
 multiple synthetic issuance days into a forward paper book with mid vs bid marks.
+
+News / FinBERT (Phase F):
+
+```bash
+uv run ql data import-news path/to/news.json --synthetic
+uv run ql sentiment score --backend fake
+uv run ql sentiment context --ticker SYN --issued-at 2024-01-10T15:00:00Z
+uv run ql experiment audit-n0
+```
+
+Optional real FinBERT (no API key): `uv sync --extra ml` then
+`uv run ql experiment fetch-n0`. Missing news is **never** treated as neutral.
 
 For **real** Kronos (optional):
 
