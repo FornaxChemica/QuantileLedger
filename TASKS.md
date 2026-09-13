@@ -30,6 +30,7 @@ sample size `N`.
 | Policy freeze before forward paper book | Done (API + CLI + mechanical runner) |
 | Forward paper P&L accumulation | Done (synthetic multi-day forward-demo + mid/bid equity curve) |
 | News / FinBERT controlled ablations | **Done** (Phase F infra + Phase G T1/T2/M1/N0 ladder) |
+| Isotonic PIT recalibration + vol regimes | **Done** (Phase H: M0c/T0c/K0c, val/eval split) |
 | Options paper trading | **Blocked** until underlying economic-value evidence |
 | Streamlit dashboard / nightly | Not started |
 
@@ -127,9 +128,12 @@ Ladder: **T1** = T0 + news volume; **T2** = T0 + volume + FinBERT; **M1** = M0 +
 
 ## Phase H — Calibration + regimes
 
-- [ ] Raw forecasts immutable; recalibrated variants are separate rows
-- [ ] No final-evaluation-period fitting
+- [x] Raw forecasts immutable; recalibrated variants are separate rows
+- [x] No final-evaluation-period fitting
 
+`M0c`/`T0c`/`K0c` = isotonic PIT children (`variant=isotonic_v1`) of M0/T0/K0.
+Fit on validation `issued_at` only; apply on eval only. Regimes = PIT realized-vol
+terciles with N + coverage + width.
 ## Phase I — Ensemble E0
 
 - [ ] Only after validation gates on challengers vs B1

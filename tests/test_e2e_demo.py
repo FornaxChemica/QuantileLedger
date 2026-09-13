@@ -29,14 +29,18 @@ def test_demo_load_and_compare(tmp_path: Path) -> None:
     assert "T0" in compare.stdout
     assert "T1" in compare.stdout or "ablation" in compare.stdout.lower()
     assert "N0" in compare.stdout or "News-only" in compare.stdout
+    assert "M0c" in compare.stdout or "Calibration" in compare.stdout
     experiments = runner.invoke(
         app, ["--data-dir", str(data_dir), "experiment", "list"]
     )
     assert experiments.exit_code == 0
     assert "M0" in experiments.stdout
+    assert "M0c" in experiments.stdout
     assert "M1" in experiments.stdout
     assert "K0" in experiments.stdout
+    assert "K0c" in experiments.stdout
     assert "T0" in experiments.stdout
+    assert "T0c" in experiments.stdout
     assert "T1" in experiments.stdout
     assert "T2" in experiments.stdout
     assert "N0" in experiments.stdout
@@ -53,3 +57,10 @@ def test_demo_load_and_compare(tmp_path: Path) -> None:
     assert audit_g.exit_code == 0, audit_g.stdout + audit_g.stderr
     assert "T1:" in audit_g.stdout
     assert "M1:" in audit_g.stdout
+    audit_h = runner.invoke(app, ["--data-dir", str(data_dir), "experiment", "audit-h"])
+    assert audit_h.exit_code == 0, audit_h.stdout + audit_h.stderr
+    assert "M0c:" in audit_h.stdout
+    assert "isotonic_pit" in audit_h.stdout
+    cal = runner.invoke(app, ["--data-dir", str(data_dir), "calibration"])
+    assert cal.exit_code == 0, cal.stdout + cal.stderr
+    assert "Raw market" in cal.stdout or "M0c" in cal.stdout

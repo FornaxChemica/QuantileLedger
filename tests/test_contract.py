@@ -63,3 +63,23 @@ def test_model_validate_roundtrip() -> None:
     fc = ForecastContract.model_validate(_valid_kwargs())
     again = validate_forecast_contract(fc)
     assert again.forecast_id == "f1"
+
+
+def test_raw_rejects_calibration_method() -> None:
+    payload = _valid_kwargs()
+    payload["calibration_method"] = "isotonic_pit"
+    with pytest.raises(ForecastValidationError):
+        validate_forecast_contract(payload)
+
+
+def test_non_raw_requires_parent_and_calibration() -> None:
+    payload = _valid_kwargs()
+    payload["variant"] = "isotonic_v1"
+    with pytest.raises(ForecastValidationError):
+        validate_forecast_contract(payload)
+    payload["parent_forecast_id"] = "parent-1"
+    payload["calibration_method"] = "isotonic_pit"
+    payload["calibration_version"] = "v1"
+    fc = validate_forecast_contract(payload)
+    assert fc.variant == "isotonic_v1"
+    assert fc.parent_forecast_id == "parent-1"

@@ -292,13 +292,103 @@ N0 = ExperimentSpec(
     label="exploratory",
 )
 
+# Phase H: isotonic PIT recalibration of market challengers (separate rows).
+_CALIBRATION_VARIANT = "isotonic_v1"
+_CALIBRATION_METHOD = "isotonic_pit"
+_CALIBRATION_VERSION = "v1"
+
+M0c = ExperimentSpec(
+    experiment_id="M0c",
+    name="mamba_quantile_isotonic_pit",
+    version="1",
+    model_family="mamba_quantile",
+    feature_set=FEATURE_SET_MARKET_ONLY,
+    feature_version=FEATURE_VERSION_V1,
+    target_definition=TARGET_LOG_RETURN,
+    status="candidate",
+    purpose=(
+        "M0 parent with isotonic PIT recalibration fit on validation issuances "
+        "only; eval-window children only. Raw M0 rows stay immutable."
+    ),
+    quantiles=DEFAULT_QUANTILES,
+    horizons_hours=DEFAULT_HORIZONS,
+    hyperparameters={
+        "parent_experiment_id": "M0",
+        "calibration_method": _CALIBRATION_METHOD,
+        "calibration_version": _CALIBRATION_VERSION,
+        "variant": _CALIBRATION_VARIANT,
+        "fit_period": "validation_only",
+    },
+    label="exploratory",
+)
+
+T0c = ExperimentSpec(
+    experiment_id="T0c",
+    name="tft_quantile_isotonic_pit",
+    version="1",
+    model_family="tft_quantile",
+    feature_set=FEATURE_SET_MARKET_ONLY,
+    feature_version=FEATURE_VERSION_V1,
+    target_definition=TARGET_LOG_RETURN,
+    status="candidate",
+    purpose=(
+        "T0 parent with isotonic PIT recalibration fit on validation issuances "
+        "only; eval-window children only. Raw T0 rows stay immutable."
+    ),
+    quantiles=DEFAULT_QUANTILES,
+    horizons_hours=DEFAULT_HORIZONS,
+    hyperparameters={
+        "parent_experiment_id": "T0",
+        "calibration_method": _CALIBRATION_METHOD,
+        "calibration_version": _CALIBRATION_VERSION,
+        "variant": _CALIBRATION_VARIANT,
+        "fit_period": "validation_only",
+    },
+    label="exploratory",
+)
+
+K0c = ExperimentSpec(
+    experiment_id="K0c",
+    name="kronos_isotonic_pit",
+    version="1",
+    model_family="kronos",
+    feature_set=FEATURE_SET_MARKET_ONLY,
+    feature_version=FEATURE_VERSION_V1,
+    target_definition=TARGET_LOG_RETURN,
+    status="candidate",
+    purpose=(
+        "K0 parent with isotonic PIT recalibration fit on validation issuances "
+        "only; eval-window children only. Raw K0 rows stay immutable."
+    ),
+    quantiles=DEFAULT_QUANTILES,
+    horizons_hours=DEFAULT_HORIZONS,
+    hyperparameters={
+        "parent_experiment_id": "K0",
+        "calibration_method": _CALIBRATION_METHOD,
+        "calibration_version": _CALIBRATION_VERSION,
+        "variant": _CALIBRATION_VARIANT,
+        "fit_period": "validation_only",
+        "distribution_claim": "sample_quantile_approx",
+    },
+    label="exploratory",
+)
+
+PARENT_TO_CALIBRATED: dict[str, str] = {
+    "M0": "M0c",
+    "T0": "T0c",
+    "K0": "K0c",
+}
+
 REGISTRY: dict[str, ExperimentSpec] = {
     B0.experiment_id: B0,
     B1.experiment_id: B1,
     M0.experiment_id: M0,
+    M0c.experiment_id: M0c,
     M1.experiment_id: M1,
     K0.experiment_id: K0,
+    K0c.experiment_id: K0c,
     T0.experiment_id: T0,
+    T0c.experiment_id: T0c,
     T1.experiment_id: T1,
     T2.experiment_id: T2,
     N0.experiment_id: N0,

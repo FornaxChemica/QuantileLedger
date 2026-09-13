@@ -101,6 +101,8 @@ def ensure_model_version(
     artifact_checksum: str | None,
     seed: int | None,
     feature_schema: dict[str, object],
+    validation_start: str | None = None,
+    validation_end: str | None = None,
 ) -> None:
     from quantile_ledger.timeutil import to_iso_utc, utc_now
 
@@ -114,7 +116,7 @@ def ensure_model_version(
             training_cutoff, created_at, state, dependencies_json, seed,
             metrics_json, failure_notes
         ) VALUES (
-            ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL,
+            ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, ?, ?,
             ?, ?, 'active', NULL, ?, NULL, NULL
         )
         ON CONFLICT(model_version_id) DO NOTHING
@@ -128,6 +130,8 @@ def ensure_model_version(
             json.dumps(feature_schema, sort_keys=True),
             json.dumps(hyperparameters, sort_keys=True),
             json.dumps(quantiles),
+            validation_start,
+            validation_end,
             training_cutoff,
             to_iso_utc(utc_now()),
             seed,
@@ -151,6 +155,16 @@ def insert_forecast(conn: sqlite3.Connection, forecast: ForecastContract) -> str
             msg = f"unknown experiment_id {validated.experiment_id}; register first"
             raise DatabaseError(msg) from None
     model_version_id = validated.model_version
+    period_meta = validated.generation_metadata.get("period")
+    validation_start = None
+    validation_end = None
+    if isinstance(period_meta, dict):
+        vs = period_meta.get("validation_start")
+        ve = period_meta.get("validation_end")
+        if isinstance(vs, str):
+            validation_start = vs
+        if isinstance(ve, str):
+            validation_end = ve
     ensure_model_version(
         conn,
         model_version_id=model_version_id,
@@ -166,6 +180,8 @@ def insert_forecast(conn: sqlite3.Connection, forecast: ForecastContract) -> str
             "feature_set": validated.feature_set,
             "feature_version": validated.feature_version,
         },
+        validation_start=validation_start,
+        validation_end=validation_end,
     )
     points = validated.as_quantile_points()
     try:
@@ -181,7 +197,7 @@ def insert_forecast(conn: sqlite3.Connection, forecast: ForecastContract) -> str
                 calibration_method, calibration_version, parent_forecast_id,
                 random_seed, artifact_digest, generation_metadata_json
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
@@ -198,6 +214,12 @@ def insert_forecast(conn: sqlite3.Connection, forecast: ForecastContract) -> str
                 validated.target_at,
                 model_version_id,
                 validated.variant,
+                validated.regime,
+                (
+                    json.dumps(validated.regime_reasons, sort_keys=True)
+                    if validated.regime_reasons is not None
+                    else None
+                ),
                 (
                     json.dumps(validated.sentiment_context, sort_keys=True)
                     if validated.sentiment_context is not None
@@ -238,6 +260,84 @@ def insert_forecast(conn: sqlite3.Connection, forecast: ForecastContract) -> str
     except ForecastValidationError:
         raise
     return validated.forecast_id
+
+
+def load_forecast_contract(
+    conn: sqlite3.Connection, forecast_id: str
+) -> ForecastContract:
+    """Reconstruct a ForecastContract from persisted forecast + quantiles."""
+    row = conn.execute(
+        "SELECT * FROM forecasts WHERE forecast_id = ?",
+        (forecast_id,),
+    ).fetchone()
+    if row is None:
+        msg = f"forecast not found: {forecast_id}"
+        raise DatabaseError(msg)
+    qrows = conn.execute(
+        """
+        SELECT q, return_value FROM forecast_quantiles
+        WHERE forecast_id = ? ORDER BY q
+        """,
+        (forecast_id,),
+    ).fetchall()
+    if not qrows:
+        msg = f"forecast {forecast_id} has no quantiles"
+        raise DatabaseError(msg)
+    meta = {}
+    raw_meta = row["generation_metadata_json"]
+    if raw_meta:
+        meta = json.loads(raw_meta)
+    sentiment = None
+    if row["sentiment_context_json"]:
+        sentiment = json.loads(row["sentiment_context_json"])
+    regime_reasons = None
+    if row["regime_reasons_json"]:
+        regime_reasons = json.loads(row["regime_reasons_json"])
+    return validate_forecast_contract(
+        {
+            "forecast_id": row["forecast_id"],
+            "run_id": row["run_id"],
+            "experiment_id": row["experiment_id"],
+            "ticker": row["ticker"],
+            "model_family": (
+                conn.execute(
+                    "SELECT family FROM model_versions WHERE model_version_id = ?",
+                    (row["model_version_id"],),
+                ).fetchone()
+                or {"family": "unknown"}
+            )["family"],
+            "model_version": row["model_version_id"],
+            "artifact_digest": row["artifact_digest"],
+            "feature_set": row["feature_set"] or "market_only",
+            "feature_version": row["feature_version"] or "v1",
+            "training_cutoff": row["training_cutoff"] or row["issued_at"],
+            "data_as_of": row["data_as_of"] or row["issued_at"],
+            "maximum_feature_timestamp": row["maximum_feature_timestamp"],
+            "issued_at": row["issued_at"],
+            "origin_bar_at": row["origin_bar_at"],
+            "target_at": row["target_at"],
+            "nominal_horizon_hours": int(row["horizon_hours"]),
+            "spot_at_issue": float(row["spot_at_issue"]),
+            "target_definition": row["target_definition"] or "log_return",
+            "target_transform": row["target_transform"] or "identity",
+            "quantile_levels": [float(q["q"]) for q in qrows],
+            "quantile_values": [float(q["return_value"]) for q in qrows],
+            "forecast_space": row["forecast_space"] or "return",
+            "calibration_method": row["calibration_method"] or "none",
+            "calibration_version": row["calibration_version"],
+            "parent_forecast_id": row["parent_forecast_id"],
+            "random_seed": row["random_seed"],
+            "status": row["status"] or "issued",
+            "created_at": row["created_at"],
+            "price_type": row["price_type"],
+            "variant": row["variant"] or "raw",
+            "regime": row["regime"],
+            "regime_reasons": regime_reasons,
+            "is_synthetic": bool(row["is_synthetic"]),
+            "generation_metadata": meta,
+            "sentiment_context": sentiment,
+        }
+    )
 
 
 def insert_outcome(

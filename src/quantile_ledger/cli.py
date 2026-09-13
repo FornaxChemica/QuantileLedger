@@ -18,8 +18,13 @@ from quantile_ledger.artifacts import (
     register_artifact,
     write_json_artifact,
 )
-from quantile_ledger.compare import SettledForecast, build_paired_cohort
+from quantile_ledger.compare import (
+    SettledForecast,
+    build_paired_cohort,
+    score_by_regime,
+)
 from quantile_ledger.config import load_settings, save_settings, set_setting
+from quantile_ledger.contract import ForecastContract
 from quantile_ledger.db import (
     add_watchlist_ticker,
     connection,
@@ -31,6 +36,7 @@ from quantile_ledger.db import (
 from quantile_ledger.errors import (
     ConfigurationError,
     DatabaseError,
+    ForecastValidationError,
     InsufficientDataError,
     MalformedInputError,
     ModelUnavailableError,
@@ -41,9 +47,13 @@ from quantile_ledger.experiments import (
     M0,
     M1,
     N0,
+    PARENT_TO_CALIBRATED,
     T0,
     T1,
     T2,
+    K0c,
+    M0c,
+    T0c,
     get_experiment,
     list_experiments,
 )
@@ -52,6 +62,7 @@ from quantile_ledger.forecast_store import (
     get_forecast_provenance,
     insert_forecast,
     insert_outcome,
+    load_forecast_contract,
     upsert_experiment,
 )
 from quantile_ledger.forecasting import run_baselines
@@ -244,20 +255,36 @@ def signal_cmd(
 
 @app.command("calibration")
 def calibration_cmd(ctx: typer.Context) -> None:
-    """Show paired B1 vs M0/K0/T0 calibration summary from stored settled forecasts."""
+    """Show raw vs isotonic-PIT calibrated cohorts and regime subgroups."""
     try:
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
         settled = _load_settled_forecasts(settings.database_path)
-        paired = build_paired_cohort(settled, experiment_ids=["B1", "M0", "K0", "T0"])
+        raw = build_paired_cohort(settled, experiment_ids=["B1", "M0", "K0", "T0"])
+        console.print("[bold]Raw market cohort[/bold]")
+        _print_paired(raw)
+        present = {f.experiment_id for f in settled}
+        if {"B1", "M0c", "T0c", "K0c"}.issubset(present):
+            cal = build_paired_cohort(
+                settled, experiment_ids=["B1", "M0c", "T0c", "K0c"]
+            )
+            console.print("[bold]Calibrated cohort (isotonic PIT)[/bold]")
+            _print_paired(cal)
+        for eid in ("M0", "T0", "K0", "M0c", "T0c", "K0c"):
+            if eid not in present:
+                continue
+            by_reg = score_by_regime(settled, experiment_id=eid)
+            if not by_reg:
+                continue
+            console.print(f"[bold]Regime subgroups — {eid}[/bold]")
+            _print_regime_table(by_reg)
     except (ConfigurationError, DatabaseError, sqlite3.Error, OSError) as exc:
         _fail(str(exc))
-    _print_paired(paired)
 
 
 @app.command("compare")
 def compare_cmd(ctx: typer.Context) -> None:
-    """Compare market and news-ablation cohorts on strict paired settled keys."""
+    """Compare market, calibration, and news-ablation cohorts on paired keys."""
     try:
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
@@ -268,6 +295,12 @@ def compare_cmd(ctx: typer.Context) -> None:
         console.print("[bold]Market cohort[/bold]")
         _print_paired(market)
         present = {f.experiment_id for f in settled}
+        if {"B1", "M0c", "T0c", "K0c"}.issubset(present):
+            cal = build_paired_cohort(
+                settled, experiment_ids=["B1", "M0c", "T0c", "K0c"]
+            )
+            console.print("[bold]Calibration cohort (M0c/T0c/K0c)[/bold]")
+            _print_paired(cal)
         if {"T0", "T1", "T2"}.issubset(present):
             tft = build_paired_cohort(settled, experiment_ids=["B1", "T0", "T1", "T2"])
             console.print("[bold]TFT news ablation cohort[/bold]")
@@ -444,6 +477,120 @@ def experiment_audit_g_cmd() -> None:
         "[dim]T0/M0 stay market-only. News variants refuse missing/partial "
         "context. Coverage always with width + N.[/dim]"
     )
+
+
+@experiment_app.command("audit-h")
+def experiment_audit_h_cmd() -> None:
+    """Print Phase H recalibration + regime status (M0c/T0c/K0c)."""
+    console.print("[bold]Phase H calibration audit[/bold]")
+    for spec in (M0c, T0c, K0c):
+        parent = spec.hyperparameters.get("parent_experiment_id")
+        method = spec.hyperparameters.get("calibration_method")
+        variant = spec.hyperparameters.get("variant")
+        console.print(
+            f"{spec.experiment_id}: parent={parent} method={method} "
+            f"variant={variant} hash={spec.config_hash()[:12]}"
+        )
+    console.print(
+        "[dim]Raw parents immutable. Fit on validation issued_at only; "
+        "children only on eval. Regimes = PIT realized-vol terciles with N.[/dim]"
+    )
+
+
+@experiment_app.command("recalibrate")
+def experiment_recalibrate_cmd(ctx: typer.Context) -> None:
+    """Fit isotonic PIT maps on validation parents; insert eval-window children."""
+    try:
+        from quantile_ledger.recalibration import (
+            fit_isotonic_pit_map,
+            issue_recalibrated_from_parent,
+            split_issuance_periods,
+        )
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        if not settings.database_path.exists():
+            _fail("Database missing. Run: ql init")
+        settled = _load_settled_forecasts(settings.database_path)
+        parents = [f for f in settled if f.experiment_id in PARENT_TO_CALIBRATED]
+        if not parents:
+            _fail("No settled M0/T0/K0 parents found")
+        issued = sorted({f.issued_at for f in parents})
+        period = split_issuance_periods(issued)
+        inserted = 0
+        with connection(settings.database_path) as conn:
+            for parent_eid, child_eid in PARENT_TO_CALIBRATED.items():
+                upsert_experiment(conn, get_experiment(child_eid))
+                val_rows = [
+                    f
+                    for f in parents
+                    if f.experiment_id == parent_eid
+                    and f.issued_at in period.validation_issued_ats
+                ]
+                if len(val_rows) < 2:
+                    console.print(
+                        f"[yellow]skip {parent_eid}: need >=2 validation rows[/yellow]"
+                    )
+                    continue
+                pit_map = fit_isotonic_pit_map(
+                    parent_experiment_id=parent_eid,
+                    levels_list=[list(f.quantile_levels) for f in val_rows],
+                    values_list=[list(f.quantile_values) for f in val_rows],
+                    actuals=[f.actual_return for f in val_rows],
+                    issued_ats=[f.issued_at for f in val_rows],
+                    period=period,
+                )
+                eval_rows = [
+                    f
+                    for f in parents
+                    if f.experiment_id == parent_eid
+                    and f.issued_at in period.eval_issued_ats
+                ]
+                for row in eval_rows:
+                    existing = conn.execute(
+                        """
+                        SELECT 1 FROM forecasts
+                        WHERE parent_forecast_id = ? AND experiment_id = ?
+                        """,
+                        (row.forecast_id, child_eid),
+                    ).fetchone()
+                    if existing is not None:
+                        continue
+                    parent = load_forecast_contract(conn, row.forecast_id)
+                    child = issue_recalibrated_from_parent(
+                        parent, pit_map=pit_map, period=period
+                    )
+                    insert_forecast(conn, child)
+                    qmap = dict(
+                        zip(child.quantile_levels, child.quantile_values, strict=True)
+                    )
+                    insert_outcome(
+                        conn,
+                        forecast_id=child.forecast_id,
+                        outcome_price=row.spot_at_issue * math.exp(row.actual_return),
+                        actual_return=row.actual_return,
+                        outcome_bar_at=row.target_at,
+                        settled_at=row.target_at,
+                        p10=qmap[0.10],
+                        p90=qmap[0.90],
+                    )
+                    inserted += 1
+            conn.commit()
+        console.print(
+            f"[green]Recalibrated[/green] inserted={inserted} "
+            f"val=[{period.validation_start} … {period.validation_end}] "
+            f"eval=[{period.eval_start} … {period.eval_end}]"
+        )
+        console.print("[dim]Raw rows unchanged. No measurable edge claimed.[/dim]")
+    except (
+        ConfigurationError,
+        DatabaseError,
+        ForecastValidationError,
+        InsufficientDataError,
+        sqlite3.Error,
+        OSError,
+    ) as exc:
+        _fail(str(exc))
 
 
 @experiment_app.command("fetch-n0")
@@ -626,7 +773,7 @@ def config_set_cmd(
 
 @demo_app.command("load")
 def demo_load_cmd(ctx: typer.Context) -> None:
-    """Load synthetic bars + news; issue market + Phase G ablations; settle."""
+    """Load multi-issuance synthetic demo with Phase G ablations + Phase H cal."""
     try:
         from quantile_ledger.ablations import (
             issue_m1_from_m0,
@@ -636,6 +783,16 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             load_context_for_ablation,
         )
         from quantile_ledger.news import import_news_file
+        from quantile_ledger.recalibration import (
+            fit_isotonic_pit_map,
+            issue_recalibrated_from_parent,
+            split_issuance_periods,
+        )
+        from quantile_ledger.regimes import (
+            fit_vol_tercile_thresholds,
+            realized_vol,
+            regime_for_closes,
+        )
         from quantile_ledger.sentiment import FakeFinBERT, score_unscored_news
 
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
@@ -645,37 +802,41 @@ def demo_load_cmd(ctx: typer.Context) -> None:
         series = make_synthetic_hourly_closes(ticker="SYN", n=320, seed=7)
         bar_horizon = 6
         lookback = 32
+        vol_lookback = 20
+        n_issues = 5
         k0_lookback = int(K0.hyperparameters["lookback"])
-        issue_idx = len(series.closes) - bar_horizon - 1
-        if issue_idx <= max(lookback, k0_lookback) + 50:
-            _fail("synthetic series too short")
-        closes_known = series.closes[: issue_idx + 1]
-        issued_at = series.bar_ends[issue_idx]
-        origin = issued_at
-        target_at = series.bar_ends[issue_idx + bar_horizon]
-        spot = closes_known[-1]
-        outcome_price = series.closes[issue_idx + bar_horizon]
-        actual_return = math.log(outcome_price / spot)
-        training_cutoff = issued_at
-        data_as_of = issued_at
+        start_idx = max(lookback, k0_lookback) + 50
+        end_idx = len(series.closes) - bar_horizon - 1
+        if end_idx <= start_idx + n_issues:
+            _fail("synthetic series too short for multi-issuance demo")
+        issue_indices = [
+            start_idx + round(i * (end_idx - start_idx) / (n_issues - 1))
+            for i in range(n_issues)
+        ]
+        issued_ats = [series.bar_ends[i] for i in issue_indices]
+        period = split_issuance_periods(issued_ats)
 
+        # Train once on closes through the first issuance so
+        # training_cutoff <= issued_at for every later demo forecast.
+        first_idx = issue_indices[0]
+        train_closes = series.closes[: first_idx + 1]
+        training_cutoff = series.bar_ends[first_idx]
         model, train_metrics = train_m0_model(
-            closes_known,
+            train_closes,
             bar_horizon=bar_horizon,
             lookback=lookback,
-            epochs=25,
+            epochs=20,
             seed=7,
             min_samples=40,
         )
         t0_model, t0_train_metrics = train_t0_model(
-            closes_known,
+            train_closes,
             bar_horizon=bar_horizon,
             lookback=lookback,
-            epochs=25,
+            epochs=20,
             seed=7,
             min_samples=40,
         )
-        rets = one_step_log_returns(closes_known)
         assert settings.model_dir is not None
         artifact_id, digest, rel = write_json_artifact(
             artifacts_dir=settings.model_dir,
@@ -690,13 +851,23 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             filename_stem="t0-demo",
         )
         k0_sampler = FakeKronosSampler(lookback=k0_lookback)
-        ohlc = closes_to_ohlc_bars(closes_known)
-        future_ends = series.bar_ends[issue_idx + 1 : issue_idx + bar_horizon + 1]
 
-        # Synthetic news published/ingested before issued_at (labeled).
-        news_path = settings.data_dir / "demo_news.json"
-        news_path.write_text(
-            json.dumps(
+        val_vols: list[float] = []
+        for idx, ts in zip(issue_indices, issued_ats, strict=True):
+            if ts not in period.validation_issued_ats:
+                continue
+            val_vols.append(
+                realized_vol(series.closes[: idx + 1], lookback=vol_lookback)
+            )
+        vol_thresholds = fit_vol_tercile_thresholds(
+            val_vols,
+            fit_as_of_max=period.validation_end,
+            lookback=vol_lookback,
+        )
+
+        news_items: list[dict[str, object]] = []
+        for issue_idx in issue_indices:
+            news_items.extend(
                 [
                     {
                         "ticker": series.ticker,
@@ -713,10 +884,12 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                         "is_synthetic": True,
                     },
                 ]
-            ),
-            encoding="utf-8",
-        )
+            )
+        news_path = settings.data_dir / "demo_news.json"
+        news_path.write_text(json.dumps(news_items), encoding="utf-8")
 
+        raw_count = 0
+        cal_count = 0
         with connection(settings.database_path) as conn:
             run_id = open_run(conn, run_type="demo_load", provider="synthetic")
             try:
@@ -744,128 +917,199 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                     model_version_id=None,
                     metadata={"is_synthetic": True},
                 )
-                b0 = run_baselines(
-                    mode="B0",
-                    ticker=series.ticker,
-                    issued_at=issued_at,
-                    origin_bar_at=origin,
-                    target_at=target_at,
-                    spot_at_issue=spot,
-                    horizon_hours=bar_horizon,
-                    training_cutoff=training_cutoff,
-                    data_as_of=data_as_of,
-                    is_synthetic=True,
-                )
-                b1 = run_baselines(
-                    mode="B1",
-                    ticker=series.ticker,
-                    issued_at=issued_at,
-                    origin_bar_at=origin,
-                    target_at=target_at,
-                    spot_at_issue=spot,
-                    horizon_hours=bar_horizon,
-                    training_cutoff=training_cutoff,
-                    data_as_of=data_as_of,
-                    closes_known_by_issue=closes_known,
-                    bar_horizon=bar_horizon,
-                    is_synthetic=True,
-                )
-                m0 = issue_m0_forecast(
-                    model,
-                    ticker=series.ticker,
-                    issued_at=issued_at,
-                    origin_bar_at=origin,
-                    target_at=target_at,
-                    spot_at_issue=spot,
-                    horizon_hours=bar_horizon,
-                    recent_one_step_log_returns=rets,
-                    training_cutoff=training_cutoff,
-                    data_as_of=data_as_of,
-                    is_synthetic=True,
-                    run_id=run_id,
-                )
-                m0 = m0.model_copy(update={"artifact_digest": digest})
-                k0 = issue_k0_forecast(
-                    k0_sampler,
-                    bars=ohlc,
-                    bar_ends=series.bar_ends[: issue_idx + 1],
-                    future_bar_ends=future_ends,
-                    ticker=series.ticker,
-                    issued_at=issued_at,
-                    origin_bar_at=origin,
-                    target_at=target_at,
-                    spot_at_issue=spot,
-                    horizon_hours=bar_horizon,
-                    pred_len=bar_horizon,
-                    training_cutoff=training_cutoff,
-                    data_as_of=data_as_of,
-                    seed=7,
-                    is_synthetic=True,
-                    run_id=run_id,
-                )
-                t0 = issue_t0_forecast(
-                    t0_model,
-                    ticker=series.ticker,
-                    issued_at=issued_at,
-                    origin_bar_at=origin,
-                    target_at=target_at,
-                    spot_at_issue=spot,
-                    horizon_hours=bar_horizon,
-                    recent_one_step_log_returns=rets,
-                    training_cutoff=training_cutoff,
-                    data_as_of=data_as_of,
-                    is_synthetic=True,
-                    run_id=run_id,
-                )
-                t0 = t0.model_copy(update={"artifact_digest": t0_digest})
-                b0 = b0.model_copy(update={"run_id": run_id})
-                b1 = b1.model_copy(update={"run_id": run_id})
 
-                news_ctx = load_context_for_ablation(
-                    conn,
-                    ticker=series.ticker,
-                    issued_at=issued_at,
-                    lookback_hours=72,
-                )
-                t1 = issue_t1_from_t0(t0, news_ctx)
-                t2 = issue_t2_from_t0(t0, news_ctx)
-                m1 = issue_m1_from_m0(m0, news_ctx)
-                n0 = issue_n0_news_only(
-                    ticker=series.ticker,
-                    issued_at=issued_at,
-                    origin_bar_at=origin,
-                    target_at=target_at,
-                    spot_at_issue=spot,
-                    horizon_hours=bar_horizon,
-                    training_cutoff=training_cutoff,
-                    data_as_of=data_as_of,
-                    ctx=news_ctx,
-                    is_synthetic=True,
-                    run_id=run_id,
-                )
-                forecasts = (b0, b1, m0, m1, k0, t0, t1, t2, n0)
-                for fc in forecasts:
-                    insert_forecast(conn, fc)
-                    qmap = dict(
-                        zip(fc.quantile_levels, fc.quantile_values, strict=True)
+                parents_by_eid: dict[
+                    str, list[tuple[ForecastContract, float, float]]
+                ] = {"M0": [], "T0": [], "K0": []}
+                for issue_idx in issue_indices:
+                    closes_known = series.closes[: issue_idx + 1]
+                    issued_at = series.bar_ends[issue_idx]
+                    origin = issued_at
+                    target_at = series.bar_ends[issue_idx + bar_horizon]
+                    spot = closes_known[-1]
+                    outcome_price = series.closes[issue_idx + bar_horizon]
+                    actual_return = math.log(outcome_price / spot)
+                    data_as_of = issued_at
+                    rets = one_step_log_returns(closes_known)
+                    ohlc = closes_to_ohlc_bars(closes_known)
+                    future_ends = series.bar_ends[
+                        issue_idx + 1 : issue_idx + bar_horizon + 1
+                    ]
+                    regime, regime_reasons = regime_for_closes(
+                        closes_known,
+                        thresholds=vol_thresholds,
+                        bar_ends=series.bar_ends[: issue_idx + 1],
+                        issued_at=issued_at,
                     )
-                    insert_outcome(
+                    regime_update = {"regime": regime, "regime_reasons": regime_reasons}
+
+                    b0 = run_baselines(
+                        mode="B0",
+                        ticker=series.ticker,
+                        issued_at=issued_at,
+                        origin_bar_at=origin,
+                        target_at=target_at,
+                        spot_at_issue=spot,
+                        horizon_hours=bar_horizon,
+                        training_cutoff=training_cutoff,
+                        data_as_of=data_as_of,
+                        is_synthetic=True,
+                    ).model_copy(update={**regime_update, "run_id": run_id})
+                    b1 = run_baselines(
+                        mode="B1",
+                        ticker=series.ticker,
+                        issued_at=issued_at,
+                        origin_bar_at=origin,
+                        target_at=target_at,
+                        spot_at_issue=spot,
+                        horizon_hours=bar_horizon,
+                        training_cutoff=training_cutoff,
+                        data_as_of=data_as_of,
+                        closes_known_by_issue=closes_known,
+                        bar_horizon=bar_horizon,
+                        is_synthetic=True,
+                    ).model_copy(update={**regime_update, "run_id": run_id})
+                    m0 = issue_m0_forecast(
+                        model,
+                        ticker=series.ticker,
+                        issued_at=issued_at,
+                        origin_bar_at=origin,
+                        target_at=target_at,
+                        spot_at_issue=spot,
+                        horizon_hours=bar_horizon,
+                        recent_one_step_log_returns=rets,
+                        training_cutoff=training_cutoff,
+                        data_as_of=data_as_of,
+                        is_synthetic=True,
+                        run_id=run_id,
+                    ).model_copy(update={**regime_update, "artifact_digest": digest})
+                    k0 = issue_k0_forecast(
+                        k0_sampler,
+                        bars=ohlc,
+                        bar_ends=series.bar_ends[: issue_idx + 1],
+                        future_bar_ends=future_ends,
+                        ticker=series.ticker,
+                        issued_at=issued_at,
+                        origin_bar_at=origin,
+                        target_at=target_at,
+                        spot_at_issue=spot,
+                        horizon_hours=bar_horizon,
+                        pred_len=bar_horizon,
+                        training_cutoff=training_cutoff,
+                        data_as_of=data_as_of,
+                        seed=7 + issue_idx,
+                        is_synthetic=True,
+                        run_id=run_id,
+                    ).model_copy(update=regime_update)
+                    t0 = issue_t0_forecast(
+                        t0_model,
+                        ticker=series.ticker,
+                        issued_at=issued_at,
+                        origin_bar_at=origin,
+                        target_at=target_at,
+                        spot_at_issue=spot,
+                        horizon_hours=bar_horizon,
+                        recent_one_step_log_returns=rets,
+                        training_cutoff=training_cutoff,
+                        data_as_of=data_as_of,
+                        is_synthetic=True,
+                        run_id=run_id,
+                    ).model_copy(update={**regime_update, "artifact_digest": t0_digest})
+
+                    news_ctx = load_context_for_ablation(
                         conn,
-                        forecast_id=fc.forecast_id,
-                        outcome_price=outcome_price,
-                        actual_return=actual_return,
-                        outcome_bar_at=target_at,
-                        settled_at=target_at,
-                        p10=qmap[0.10],
-                        p90=qmap[0.90],
+                        ticker=series.ticker,
+                        issued_at=issued_at,
+                        lookback_hours=72,
                     )
+                    t1 = issue_t1_from_t0(t0, news_ctx).model_copy(update=regime_update)
+                    t2 = issue_t2_from_t0(t0, news_ctx).model_copy(update=regime_update)
+                    m1 = issue_m1_from_m0(m0, news_ctx).model_copy(update=regime_update)
+                    n0 = issue_n0_news_only(
+                        ticker=series.ticker,
+                        issued_at=issued_at,
+                        origin_bar_at=origin,
+                        target_at=target_at,
+                        spot_at_issue=spot,
+                        horizon_hours=bar_horizon,
+                        training_cutoff=training_cutoff,
+                        data_as_of=data_as_of,
+                        ctx=news_ctx,
+                        is_synthetic=True,
+                        run_id=run_id,
+                    ).model_copy(update=regime_update)
+
+                    forecasts = (b0, b1, m0, m1, k0, t0, t1, t2, n0)
+                    for fc in forecasts:
+                        insert_forecast(conn, fc)
+                        qmap = dict(
+                            zip(fc.quantile_levels, fc.quantile_values, strict=True)
+                        )
+                        insert_outcome(
+                            conn,
+                            forecast_id=fc.forecast_id,
+                            outcome_price=outcome_price,
+                            actual_return=actual_return,
+                            outcome_bar_at=target_at,
+                            settled_at=target_at,
+                            p10=qmap[0.10],
+                            p90=qmap[0.90],
+                        )
+                        raw_count += 1
+                    parents_by_eid["M0"].append((m0, actual_return, outcome_price))
+                    parents_by_eid["T0"].append((t0, actual_return, outcome_price))
+                    parents_by_eid["K0"].append((k0, actual_return, outcome_price))
+
+                for parent_eid in ("M0", "T0", "K0"):
+                    rows = parents_by_eid[parent_eid]
+                    val_rows = [
+                        (p, y, op)
+                        for p, y, op in rows
+                        if p.issued_at in period.validation_issued_ats
+                    ]
+                    pit_map = fit_isotonic_pit_map(
+                        parent_experiment_id=parent_eid,
+                        levels_list=[list(p.quantile_levels) for p, _, _ in val_rows],
+                        values_list=[list(p.quantile_values) for p, _, _ in val_rows],
+                        actuals=[y for _, y, _ in val_rows],
+                        issued_ats=[p.issued_at for p, _, _ in val_rows],
+                        period=period,
+                    )
+                    for parent, actual_return, outcome_price in rows:
+                        if parent.issued_at not in period.eval_issued_ats:
+                            continue
+                        child = issue_recalibrated_from_parent(
+                            parent, pit_map=pit_map, period=period
+                        )
+                        insert_forecast(conn, child)
+                        qmap = dict(
+                            zip(
+                                child.quantile_levels,
+                                child.quantile_values,
+                                strict=True,
+                            )
+                        )
+                        insert_outcome(
+                            conn,
+                            forecast_id=child.forecast_id,
+                            outcome_price=outcome_price,
+                            actual_return=actual_return,
+                            outcome_bar_at=child.target_at,
+                            settled_at=child.target_at,
+                            p10=qmap[0.10],
+                            p90=qmap[0.90],
+                        )
+                        cal_count += 1
+
                 close_run(
                     conn,
                     run_id,
                     status="succeeded",
                     row_counts={
-                        "forecasts": len(forecasts),
-                        "outcomes": len(forecasts),
+                        "forecasts": raw_count + cal_count,
+                        "outcomes": raw_count + cal_count,
+                        "issuances": n_issues,
+                        "calibrated": cal_count,
                     },
                 )
             except Exception as exc:
@@ -874,10 +1118,14 @@ def demo_load_cmd(ctx: typer.Context) -> None:
         console.print(
             "[green]Loaded synthetic demo[/green] "
             f"ticker={series.ticker} horizon={bar_horizon}h "
+            f"issuances={n_issues} "
+            f"val_n={len(period.validation_issued_ats)} "
+            f"eval_n={len(period.eval_issued_ats)} "
+            f"calibrated={cal_count} "
             f"M0_train_pinball={train_metrics['mean_pinball']:.6f} "
             f"T0_train_pinball={t0_train_metrics['mean_pinball']:.6f} "
-            f"K0_samples={k0.generation_metadata.get('sample_count')} "
             f"ablations=T1,T2,M1,N0 "
+            f"cal=M0c,T0c,K0c "
             f"artifact={digest[:12]}"
         )
         console.print(
@@ -885,9 +1133,16 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             "K0 uses FakeKronosSampler (not pretrained weights). "
             "T0 is local TFT-style (not pytorch-forecasting). "
             "News ablations use FakeFinBERT; missing≠neutral. "
+            "Calibrated children fit on validation issuances only. "
             "Paper-only · no measurable edge claimed.[/dim]"
         )
-    except (ConfigurationError, DatabaseError, InsufficientDataError, OSError) as exc:
+    except (
+        ConfigurationError,
+        DatabaseError,
+        ForecastValidationError,
+        InsufficientDataError,
+        OSError,
+    ) as exc:
         _fail(str(exc))
 
 
@@ -897,7 +1152,8 @@ def _load_settled_forecasts(database_path: Path) -> list[SettledForecast]:
             """
             SELECT f.forecast_id, f.experiment_id, f.ticker, f.issued_at,
                    f.origin_bar_at, f.target_at, f.horizon_hours, f.spot_at_issue,
-                   f.price_type, o.actual_return
+                   f.price_type, f.variant, f.regime, f.parent_forecast_id,
+                   o.actual_return
             FROM forecasts f
             JOIN outcomes o ON o.forecast_id = f.forecast_id
             WHERE o.actual_return IS NOT NULL
@@ -929,6 +1185,9 @@ def _load_settled_forecasts(database_path: Path) -> list[SettledForecast]:
                     quantile_values=values,
                     actual_return=float(row["actual_return"]),
                     price_type=row["price_type"],
+                    variant=row["variant"] or "raw",
+                    regime=row["regime"],
+                    parent_forecast_id=row["parent_forecast_id"],
                 )
             )
         return out
@@ -960,6 +1219,24 @@ def _print_paired(paired: object) -> None:
         "[dim]Coverage is shown beside width. Approx CRPS is quantile-grid only. "
         "Negative skill means worse than B1.[/dim]"
     )
+
+
+def _print_regime_table(by_reg: dict[str, dict[str, float | int | None]]) -> None:
+    table = Table(title="Regime subgroups (N + coverage + width)")
+    table.add_column("Regime")
+    table.add_column("N")
+    table.add_column("Pinball")
+    table.add_column("Cov P10-P90")
+    table.add_column("Width")
+    for label, metrics in by_reg.items():
+        table.add_row(
+            label,
+            str(metrics.get("sample_count")),
+            _fmt(metrics.get("mean_pinball")),
+            _fmt(metrics.get("coverage_p10_p90")),
+            _fmt(metrics.get("mean_width_return")),
+        )
+    console.print(table)
 
 
 def _fmt(value: object) -> str:

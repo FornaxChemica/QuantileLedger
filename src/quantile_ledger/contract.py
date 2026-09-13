@@ -69,6 +69,8 @@ class ForecastContract(BaseModel):
     created_at: str
     price_type: str = "adjusted_research"
     variant: str = "raw"
+    regime: str | None = None
+    regime_reasons: dict[str, Any] | None = None
     is_synthetic: bool = False
     generation_metadata: dict[str, Any] = Field(default_factory=dict)
     sentiment_context: dict[str, Any] | None = None
@@ -108,6 +110,20 @@ class ForecastContract(BaseModel):
         if self.target_at <= self.issued_at:
             msg = "target_at must be strictly after issued_at"
             raise ValueError(msg)
+        if self.variant == "raw":
+            if self.calibration_method != "none":
+                msg = "raw variant requires calibration_method='none'"
+                raise ValueError(msg)
+        else:
+            if self.parent_forecast_id is None:
+                msg = "non-raw variant requires parent_forecast_id"
+                raise ValueError(msg)
+            if self.calibration_method == "none":
+                msg = "non-raw variant requires calibration_method != 'none'"
+                raise ValueError(msg)
+            if not self.calibration_version:
+                msg = "non-raw variant requires calibration_version"
+                raise ValueError(msg)
         return self
 
     def price_quantiles(self) -> list[float]:

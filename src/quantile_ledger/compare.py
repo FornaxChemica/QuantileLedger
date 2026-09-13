@@ -34,6 +34,9 @@ class SettledForecast:
     quantile_values: tuple[float, ...]  # return space
     actual_return: float
     price_type: str = "adjusted_research"
+    variant: str = "raw"
+    regime: str | None = None
+    parent_forecast_id: str | None = None
 
 
 @dataclass
@@ -195,3 +198,47 @@ def score_paired_cohort(
 
 def math_exp_price(spot: float, log_return: float) -> float:
     return spot * math.exp(log_return)
+
+
+def score_by_regime(
+    forecasts: Sequence[SettledForecast],
+    *,
+    experiment_id: str,
+    p10: float = 0.10,
+    p90: float = 0.90,
+) -> dict[str, dict[str, float | int | None]]:
+    """Per-regime pinball/coverage/width with sample counts (skip empty)."""
+    by_regime: dict[str, list[SettledForecast]] = {}
+    for f in forecasts:
+        if f.experiment_id != experiment_id:
+            continue
+        label = f.regime if f.regime else "unlabeled"
+        by_regime.setdefault(label, []).append(f)
+    out: dict[str, dict[str, float | int | None]] = {}
+    for label, rows in sorted(by_regime.items()):
+        if not rows:
+            continue
+        actuals = [r.actual_return for r in rows]
+        levels = list(rows[0].quantile_levels)
+        by_q: dict[float, Sequence[float]] = {
+            q: [
+                dict(zip(r.quantile_levels, r.quantile_values, strict=True))[q]
+                for r in rows
+            ]
+            for q in levels
+        }
+        lowers: list[float] = []
+        uppers: list[float] = []
+        for r in rows:
+            qmap = dict(zip(r.quantile_levels, r.quantile_values, strict=True))
+            lowers.append(qmap[p10])
+            uppers.append(qmap[p90])
+        cov = interval_coverage(actuals, lowers, uppers)
+        out[label] = {
+            "sample_count": len(actuals),
+            "mean_pinball": aggregate_quantile_loss(actuals, levels, by_q),
+            "coverage_p10_p90": cov,
+            "coverage_error_vs_0_80": coverage_error(cov, 0.80),
+            "mean_width_return": mean_width(lowers, uppers),
+        }
+    return out

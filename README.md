@@ -48,6 +48,7 @@ A **local-first** research tool for US equities/ETFs that:
 | T2 | TFT + volume + FinBERT | Market + news | Implemented (frozen shift on T0) |
 | M1 | Mamba + volume + FinBERT | Market + news | Implemented (frozen shift on M0) |
 | N0 | News-only FinBERT baseline | News only | Implemented (vs B1; missing refuses) |
+| M0c / T0c / K0c | Isotonic PIT recalibration of M0/T0/K0 | Market only | Implemented (`variant=isotonic_v1`; fit on val only) |
 | E0 | Ensemble | — | Not implemented |
 
 Target convention: cumulative **log return** `r = log(P_target / P_issue)`,
@@ -64,10 +65,15 @@ uv run ql doctor
 uv run ql experiment list
 uv run ql demo load
 uv run ql compare
+uv run ql calibration
+uv run ql experiment audit-h
 uv run ql experiment audit-k0
 uv run ql experiment audit-t0
 ```
 
+`ql demo load` issues multiple synthetic dates, fits isotonic PIT maps on the
+validation slice only, and inserts `M0c`/`T0c`/`K0c` on the eval slice. Raw
+parents stay immutable. No measurable edge is claimed after recalibration.
 Paper long/flat (hypothetical; freeze policy first):
 
 ```bash
