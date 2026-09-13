@@ -44,7 +44,10 @@ A **local-first** research tool for US equities/ETFs that:
 | M0 | MambaQuantile (local selective SSM) | Market only | Implemented (candidate) |
 | K0 | Kronos sample → empirical quantiles | Market only | Implemented (fake in demo; real via `[ml]` + `fetch-k0`) |
 | T0 | TFT-style gated attention quantiles | Market only | Implemented (local; not pytorch-forecasting) |
-| N0 | FinBERT news context ablation | Market + news | Implemented (fake default; real via `[ml]` + `fetch-n0`) |
+| T1 | TFT + news volume | Market + news volume | Implemented (frozen shift on T0) |
+| T2 | TFT + volume + FinBERT | Market + news | Implemented (frozen shift on T0) |
+| M1 | Mamba + volume + FinBERT | Market + news | Implemented (frozen shift on M0) |
+| N0 | News-only FinBERT baseline | News only | Implemented (vs B1; missing refuses) |
 | E0 | Ensemble | — | Not implemented |
 
 Target convention: cumulative **log return** `r = log(P_target / P_issue)`,

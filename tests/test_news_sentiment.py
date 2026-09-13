@@ -191,8 +191,9 @@ def test_ingest_before_publish_rejected() -> None:
 
 def test_n0_experiment_registry() -> None:
     assert N0.experiment_id == "N0"
-    assert N0.feature_set == "market_plus_news"
-    assert "missing" in str(N0.hyperparameters.get("missing_sentiment"))
+    assert N0.feature_set == "news_only"
+    assert N0.version == "2"
+    assert N0.hyperparameters.get("missing_policy") == "refuse"
 
 
 def test_failed_sentiment_can_be_retried(tmp_path: Path) -> None:

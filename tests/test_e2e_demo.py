@@ -27,13 +27,19 @@ def test_demo_load_and_compare(tmp_path: Path) -> None:
     assert "M0" in compare.stdout
     assert "K0" in compare.stdout
     assert "T0" in compare.stdout
+    assert "T1" in compare.stdout or "ablation" in compare.stdout.lower()
+    assert "N0" in compare.stdout or "News-only" in compare.stdout
     experiments = runner.invoke(
         app, ["--data-dir", str(data_dir), "experiment", "list"]
     )
     assert experiments.exit_code == 0
     assert "M0" in experiments.stdout
+    assert "M1" in experiments.stdout
     assert "K0" in experiments.stdout
     assert "T0" in experiments.stdout
+    assert "T1" in experiments.stdout
+    assert "T2" in experiments.stdout
+    assert "N0" in experiments.stdout
     assert "Milestone 0" in experiments.stdout
     audit = runner.invoke(app, ["--data-dir", str(data_dir), "experiment", "audit-k0"])
     assert audit.exit_code == 0, audit.stdout + audit.stderr
@@ -43,3 +49,7 @@ def test_demo_load_and_compare(tmp_path: Path) -> None:
     )
     assert audit_t0.exit_code == 0, audit_t0.stdout + audit_t0.stderr
     assert "local_tft_attention_numpy_v1" in audit_t0.stdout
+    audit_g = runner.invoke(app, ["--data-dir", str(data_dir), "experiment", "audit-g"])
+    assert audit_g.exit_code == 0, audit_g.stdout + audit_g.stderr
+    assert "T1:" in audit_g.stdout
+    assert "M1:" in audit_g.stdout

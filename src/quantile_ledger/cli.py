@@ -36,7 +36,17 @@ from quantile_ledger.errors import (
     ModelUnavailableError,
     QuantileLedgerError,
 )
-from quantile_ledger.experiments import K0, M0, N0, T0, get_experiment, list_experiments
+from quantile_ledger.experiments import (
+    K0,
+    M0,
+    M1,
+    N0,
+    T0,
+    T1,
+    T2,
+    get_experiment,
+    list_experiments,
+)
 from quantile_ledger.forecast_store import (
     freeze_experiment,
     get_forecast_provenance,
@@ -247,17 +257,31 @@ def calibration_cmd(ctx: typer.Context) -> None:
 
 @app.command("compare")
 def compare_cmd(ctx: typer.Context) -> None:
-    """Compare B0/B1/M0/K0/T0 on the strict paired settled cohort."""
+    """Compare market and news-ablation cohorts on strict paired settled keys."""
     try:
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
         settled = _load_settled_forecasts(settings.database_path)
-        paired = build_paired_cohort(
+        market = build_paired_cohort(
             settled, experiment_ids=["B0", "B1", "M0", "K0", "T0"]
         )
+        console.print("[bold]Market cohort[/bold]")
+        _print_paired(market)
+        present = {f.experiment_id for f in settled}
+        if {"T0", "T1", "T2"}.issubset(present):
+            tft = build_paired_cohort(settled, experiment_ids=["B1", "T0", "T1", "T2"])
+            console.print("[bold]TFT news ablation cohort[/bold]")
+            _print_paired(tft)
+        if {"M0", "M1"}.issubset(present):
+            mamba = build_paired_cohort(settled, experiment_ids=["B1", "M0", "M1"])
+            console.print("[bold]Mamba news ablation cohort[/bold]")
+            _print_paired(mamba)
+        if {"B1", "N0"}.issubset(present):
+            news = build_paired_cohort(settled, experiment_ids=["B1", "N0"])
+            console.print("[bold]News-only vs B1 cohort[/bold]")
+            _print_paired(news)
     except (ConfigurationError, DatabaseError, sqlite3.Error, OSError) as exc:
         _fail(str(exc))
-    _print_paired(paired)
 
 
 @experiment_app.command("list")
@@ -280,7 +304,8 @@ def experiment_list_cmd(ctx: typer.Context) -> None:
     console.print(table)
     console.print(
         "[dim]Note: foundation build 'Milestone 0' ≠ research experiment M0 "
-        "(MambaQuantile). K0 = Kronos; T0 = local TFT-style; N0 = news/FinBERT.[/dim]"
+        "(MambaQuantile). K0 = Kronos; T0/T1/T2 = TFT ladder; "
+        "M1/N0 = news ablations.[/dim]"
     )
     _ = ctx
 
@@ -391,19 +416,34 @@ def experiment_audit_t0_cmd() -> None:
 
 @experiment_app.command("audit-n0")
 def experiment_audit_n0_cmd() -> None:
-    """Print the N0 (news / FinBERT context) audit checklist status."""
-    console.print("[bold]N0 audit (news FinBERT context ablation)[/bold]")
+    """Print the N0 (news-only baseline) audit checklist status."""
+    console.print("[bold]N0 audit (news-only FinBERT baseline)[/bold]")
     console.print(f"experiment_id: {N0.experiment_id}")
     console.print(f"version: {N0.version}")
     console.print(f"config_hash: {N0.config_hash()}")
     console.print(f"feature_set: {N0.feature_set}/{N0.feature_version}")
-    console.print(f"pit_rules: {N0.hyperparameters.get('pit_rules')}")
-    console.print(f"missing_sentiment: {N0.hyperparameters.get('missing_sentiment')}")
+    console.print(f"missing_policy: {N0.hyperparameters.get('missing_policy')}")
     console.print(
-        "scorers: fake_finbert_v1 (offline default); "
-        "ProsusAI/finbert optional via `uv sync --extra ml` + fetch-n0"
+        "issues forecasts from PIT FinBERT polarity + volume width; "
+        "no market returns; missing ≠ neutral"
     )
-    console.print("status: draft — context builder only; Phase G wires model ablations")
+    console.print("status: candidate (Phase G news-only baseline vs B1)")
+
+
+@experiment_app.command("audit-g")
+def experiment_audit_g_cmd() -> None:
+    """Print Phase G ablation ladder status (T1/T2/M1/N0)."""
+    console.print("[bold]Phase G ablation audit[/bold]")
+    for spec in (T1, T2, M1, N0):
+        console.print(
+            f"{spec.experiment_id}: feature_set={spec.feature_set} "
+            f"parent={spec.hyperparameters.get('parent_experiment_id', '—')} "
+            f"hash={spec.config_hash()[:12]}"
+        )
+    console.print(
+        "[dim]T0/M0 stay market-only. News variants refuse missing/partial "
+        "context. Coverage always with width + N.[/dim]"
+    )
 
 
 @experiment_app.command("fetch-n0")
@@ -586,8 +626,18 @@ def config_set_cmd(
 
 @demo_app.command("load")
 def demo_load_cmd(ctx: typer.Context) -> None:
-    """Load synthetic bars, issue B0/B1/M0/K0/T0, settle, label synthetic."""
+    """Load synthetic bars + news; issue market + Phase G ablations; settle."""
     try:
+        from quantile_ledger.ablations import (
+            issue_m1_from_m0,
+            issue_n0_news_only,
+            issue_t1_from_t0,
+            issue_t2_from_t0,
+            load_context_for_ablation,
+        )
+        from quantile_ledger.news import import_news_file
+        from quantile_ledger.sentiment import FakeFinBERT, score_unscored_news
+
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
         if not settings.database_path.exists():
@@ -642,11 +692,38 @@ def demo_load_cmd(ctx: typer.Context) -> None:
         k0_sampler = FakeKronosSampler(lookback=k0_lookback)
         ohlc = closes_to_ohlc_bars(closes_known)
         future_ends = series.bar_ends[issue_idx + 1 : issue_idx + bar_horizon + 1]
+
+        # Synthetic news published/ingested before issued_at (labeled).
+        news_path = settings.data_dir / "demo_news.json"
+        news_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "ticker": series.ticker,
+                        "headline": "SYN beats estimates; shares surge",
+                        "published_at": series.bar_ends[max(0, issue_idx - 8)],
+                        "ingested_at": series.bar_ends[max(0, issue_idx - 7)],
+                        "is_synthetic": True,
+                    },
+                    {
+                        "ticker": series.ticker,
+                        "headline": "Analyst upgrade lifts outlook",
+                        "published_at": series.bar_ends[max(0, issue_idx - 3)],
+                        "ingested_at": series.bar_ends[max(0, issue_idx - 2)],
+                        "is_synthetic": True,
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+
         with connection(settings.database_path) as conn:
             run_id = open_run(conn, run_type="demo_load", provider="synthetic")
             try:
                 for spec in list_experiments():
                     upsert_experiment(conn, spec)
+                import_news_file(conn, news_path, force_synthetic=True)
+                score_unscored_news(conn, scorer=FakeFinBERT())
                 register_artifact(
                     conn,
                     artifact_id=artifact_id,
@@ -743,7 +820,31 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                 t0 = t0.model_copy(update={"artifact_digest": t0_digest})
                 b0 = b0.model_copy(update={"run_id": run_id})
                 b1 = b1.model_copy(update={"run_id": run_id})
-                for fc in (b0, b1, m0, k0, t0):
+
+                news_ctx = load_context_for_ablation(
+                    conn,
+                    ticker=series.ticker,
+                    issued_at=issued_at,
+                    lookback_hours=72,
+                )
+                t1 = issue_t1_from_t0(t0, news_ctx)
+                t2 = issue_t2_from_t0(t0, news_ctx)
+                m1 = issue_m1_from_m0(m0, news_ctx)
+                n0 = issue_n0_news_only(
+                    ticker=series.ticker,
+                    issued_at=issued_at,
+                    origin_bar_at=origin,
+                    target_at=target_at,
+                    spot_at_issue=spot,
+                    horizon_hours=bar_horizon,
+                    training_cutoff=training_cutoff,
+                    data_as_of=data_as_of,
+                    ctx=news_ctx,
+                    is_synthetic=True,
+                    run_id=run_id,
+                )
+                forecasts = (b0, b1, m0, m1, k0, t0, t1, t2, n0)
+                for fc in forecasts:
                     insert_forecast(conn, fc)
                     qmap = dict(
                         zip(fc.quantile_levels, fc.quantile_values, strict=True)
@@ -762,7 +863,10 @@ def demo_load_cmd(ctx: typer.Context) -> None:
                     conn,
                     run_id,
                     status="succeeded",
-                    row_counts={"forecasts": 5, "outcomes": 5},
+                    row_counts={
+                        "forecasts": len(forecasts),
+                        "outcomes": len(forecasts),
+                    },
                 )
             except Exception as exc:
                 fail_run(conn, run_id, str(exc))
@@ -773,12 +877,14 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             f"M0_train_pinball={train_metrics['mean_pinball']:.6f} "
             f"T0_train_pinball={t0_train_metrics['mean_pinball']:.6f} "
             f"K0_samples={k0.generation_metadata.get('sample_count')} "
+            f"ablations=T1,T2,M1,N0 "
             f"artifact={digest[:12]}"
         )
         console.print(
             "[dim]All demo rows are labeled is_synthetic=1. "
             "K0 uses FakeKronosSampler (not pretrained weights). "
             "T0 is local TFT-style (not pytorch-forecasting). "
+            "News ablations use FakeFinBERT; missing≠neutral. "
             "Paper-only · no measurable edge claimed.[/dim]"
         )
     except (ConfigurationError, DatabaseError, InsufficientDataError, OSError) as exc:

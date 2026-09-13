@@ -18,7 +18,7 @@ from quantile_ledger.news import list_eligible_news
 from quantile_ledger.timeutil import to_iso_utc, utc_now
 
 SentimentLabel = Literal["positive", "negative", "neutral", "failed"]
-ContextStatus = Literal["missing", "unscored", "scored"]
+ContextStatus = Literal["missing", "unscored", "partial", "scored"]
 
 SCORER_FAKE = "fake_finbert_v1"
 SCORER_FINBERT = "prosusai_finbert"
@@ -241,6 +241,18 @@ class TransformersFinBERT:
             )
         # pipeline top_k=None → list[list[{label, score}]]
         rows = raw[0] if raw and isinstance(raw[0], list) else raw
+        if not rows:
+            return HeadlineScore(
+                label="failed",
+                score_positive=math.nan,
+                score_negative=math.nan,
+                score_neutral=math.nan,
+                status="failed",
+                scorer_id=self.scorer_id,
+                model_ref=self.model_ref,
+                is_synthetic=False,
+                metadata={"error": "empty_pipeline_output"},
+            )
         probs = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
         for row in rows:
             key = str(row["label"]).lower()
@@ -250,6 +262,19 @@ class TransformersFinBERT:
                 probs["negative"] = float(row["score"])
             else:
                 probs["neutral"] = float(row["score"])
+        total = probs["positive"] + probs["negative"] + probs["neutral"]
+        if total <= 0.0 or not math.isfinite(total):
+            return HeadlineScore(
+                label="failed",
+                score_positive=math.nan,
+                score_negative=math.nan,
+                score_neutral=math.nan,
+                status="failed",
+                scorer_id=self.scorer_id,
+                model_ref=self.model_ref,
+                is_synthetic=False,
+                metadata={"error": "non_finite_or_zero_probs"},
+            )
         label = max(probs, key=probs.get)  # type: ignore[arg-type]
         return HeadlineScore(
             label=label,  # type: ignore[arg-type]
@@ -433,9 +458,19 @@ def build_sentiment_context(
     ticker: str,
     issued_at: str,
     scorer_id: str = SCORER_FAKE,
+    lookback_hours: int | None = 72,
 ) -> SentimentContext:
-    """Aggregate PIT-eligible news scores; missing ≠ neutral."""
-    items = list_eligible_news(conn, ticker=ticker, issued_at=issued_at)
+    """Aggregate PIT-eligible news scores; missing ≠ neutral.
+
+    ``lookback_hours`` bounds published_at (default 72h). Pass None for unbounded.
+    ``partial`` means some but not all eligible items are scored.
+    """
+    items = list_eligible_news(
+        conn,
+        ticker=ticker,
+        issued_at=issued_at,
+        lookback_hours=lookback_hours,
+    )
     if not items:
         return SentimentContext(
             ticker=ticker.upper(),
@@ -496,10 +531,11 @@ def build_sentiment_context(
         "neutral": mean_neu,
     }
     dominant: SentimentLabel = max(means, key=means.get)  # type: ignore[arg-type]
+    status: ContextStatus = "scored" if len(score_rows) == len(items) else "partial"
     return SentimentContext(
         ticker=ticker.upper(),
         issued_at=issued_at,
-        status="scored",
+        status=status,
         n_items=len(items),
         n_scored=len(score_rows),
         mean_positive=mean_pos,

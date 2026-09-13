@@ -260,20 +260,33 @@ def list_eligible_news(
     *,
     ticker: str,
     issued_at: str,
+    lookback_hours: int | None = None,
 ) -> list[dict[str, Any]]:
     """News visible at issued_at: published_at and ingested_at both <= issued_at."""
+    from datetime import timedelta
+
     issued = _normalize_iso(issued_at, field="issued_at")
+    params: list[Any] = [ticker.upper(), issued, issued]
+    lookback_clause = ""
+    if lookback_hours is not None:
+        if lookback_hours < 1:
+            msg = "lookback_hours must be >= 1"
+            raise MalformedInputError(msg)
+        earliest = to_iso_utc(parse_iso_utc(issued) - timedelta(hours=lookback_hours))
+        lookback_clause = " AND published_at >= ?"
+        params.append(earliest)
     rows = conn.execute(
-        """
+        f"""
         SELECT news_id, ticker, headline, source, url, published_at, ingested_at,
                content_hash, dedupe_key, is_retrospective, quality, is_synthetic
         FROM news_items
         WHERE ticker = ?
           AND published_at <= ?
           AND ingested_at <= ?
+          {lookback_clause}
         ORDER BY published_at ASC, news_id ASC
         """,
-        (ticker.upper(), issued, issued),
+        params,
     ).fetchall()
     return [dict(row) for row in rows]
 

@@ -11,6 +11,8 @@ from quantile_ledger.contract import (
     DEFAULT_QUANTILES,
     FEATURE_SET_MARKET_ONLY,
     FEATURE_SET_MARKET_PLUS_NEWS,
+    FEATURE_SET_MARKET_PLUS_NEWS_VOLUME,
+    FEATURE_SET_NEWS_ONLY,
     FEATURE_VERSION_V1,
     TARGET_LOG_RETURN,
 )
@@ -177,29 +179,115 @@ T0 = ExperimentSpec(
     label="exploratory",
 )
 
-N0 = ExperimentSpec(
-    experiment_id="N0",
-    name="news_finbert_context_ablation",
+# Phase G controlled feature ladder (frozen linear news shifts on parent models).
+_DEFAULT_NEWS_LOOKBACK_HOURS = 72
+_DEFAULT_VOLUME_WEIGHT = 0.0005
+_DEFAULT_SENTIMENT_WEIGHT = 0.0020
+
+T1 = ExperimentSpec(
+    experiment_id="T1",
+    name="tft_plus_news_volume",
     version="1",
-    model_family="finbert_context",
-    feature_set=FEATURE_SET_MARKET_PLUS_NEWS,
+    model_family="tft_quantile",
+    feature_set=FEATURE_SET_MARKET_PLUS_NEWS_VOLUME,
     feature_version=FEATURE_VERSION_V1,
     target_definition=TARGET_LOG_RETURN,
-    status="draft",
+    status="candidate",
     purpose=(
-        "Controlled news ablation: local FinBERT (or fake lexicon) headline "
-        "scores under point-in-time published_at/ingested_at cutoffs. "
-        "Missing sentiment is never treated as neutral. Does not itself issue "
-        "market forecasts; pairs with challenger ablations in Phase G."
+        "T0 parent TFT quantiles plus frozen news-volume shift only "
+        "(log1p count in PIT lookback). Missing news refuses issuance."
     ),
     quantiles=DEFAULT_QUANTILES,
     horizons_hours=DEFAULT_HORIZONS,
     hyperparameters={
-        "scorer_fake": "fake_finbert_v1",
-        "scorer_real": "prosusai_finbert",
-        "model_id": "ProsusAI/finbert",
-        "missing_sentiment": "explicit_missing_not_neutral",
-        "pit_rules": ["published_at<=issued_at", "ingested_at<=issued_at"],
+        "parent_experiment_id": "T0",
+        "news_lookback_hours": _DEFAULT_NEWS_LOOKBACK_HOURS,
+        "volume_weight": _DEFAULT_VOLUME_WEIGHT,
+        "sentiment_weight": 0.0,
+        "missing_policy": "refuse",
+        "adjustment": "additive_return_shift_isotonic_v1",
+    },
+    label="exploratory",
+)
+
+T2 = ExperimentSpec(
+    experiment_id="T2",
+    name="tft_plus_news_volume_finbert",
+    version="1",
+    model_family="tft_quantile",
+    feature_set=FEATURE_SET_MARKET_PLUS_NEWS,
+    feature_version=FEATURE_VERSION_V1,
+    target_definition=TARGET_LOG_RETURN,
+    status="candidate",
+    purpose=(
+        "T0 parent TFT quantiles plus news volume and FinBERT polarity "
+        "(pos-neg). Requires fully scored context; missing/partial refuses."
+    ),
+    quantiles=DEFAULT_QUANTILES,
+    horizons_hours=DEFAULT_HORIZONS,
+    hyperparameters={
+        "parent_experiment_id": "T0",
+        "news_lookback_hours": _DEFAULT_NEWS_LOOKBACK_HOURS,
+        "volume_weight": _DEFAULT_VOLUME_WEIGHT,
+        "sentiment_weight": _DEFAULT_SENTIMENT_WEIGHT,
+        "missing_policy": "refuse",
+        "require_full_scores": True,
+        "adjustment": "additive_return_shift_isotonic_v1",
+    },
+    label="exploratory",
+)
+
+M1 = ExperimentSpec(
+    experiment_id="M1",
+    name="mamba_plus_news_volume_finbert",
+    version="1",
+    model_family="mamba_quantile",
+    feature_set=FEATURE_SET_MARKET_PLUS_NEWS,
+    feature_version=FEATURE_VERSION_V1,
+    target_definition=TARGET_LOG_RETURN,
+    status="candidate",
+    purpose=(
+        "M0 parent MambaQuantile plus news volume and FinBERT polarity. "
+        "Missing/partial news refuses issuance (never imputed as neutral)."
+    ),
+    quantiles=DEFAULT_QUANTILES,
+    horizons_hours=DEFAULT_HORIZONS,
+    hyperparameters={
+        "parent_experiment_id": "M0",
+        "news_lookback_hours": _DEFAULT_NEWS_LOOKBACK_HOURS,
+        "volume_weight": _DEFAULT_VOLUME_WEIGHT,
+        "sentiment_weight": _DEFAULT_SENTIMENT_WEIGHT,
+        "missing_policy": "refuse",
+        "require_full_scores": True,
+        "adjustment": "additive_return_shift_isotonic_v1",
+    },
+    label="exploratory",
+)
+
+N0 = ExperimentSpec(
+    experiment_id="N0",
+    name="news_only_finbert_baseline",
+    version="2",
+    model_family="news_only_baseline",
+    feature_set=FEATURE_SET_NEWS_ONLY,
+    feature_version=FEATURE_VERSION_V1,
+    target_definition=TARGET_LOG_RETURN,
+    status="candidate",
+    purpose=(
+        "News-only probabilistic baseline: median shift from FinBERT polarity "
+        "plus residual spread from volume; no market returns. Missing news "
+        "refuses issuance. Compares to B1 under the same outcome pairing."
+    ),
+    quantiles=DEFAULT_QUANTILES,
+    horizons_hours=DEFAULT_HORIZONS,
+    hyperparameters={
+        "news_lookback_hours": _DEFAULT_NEWS_LOOKBACK_HOURS,
+        "sentiment_to_p50": _DEFAULT_SENTIMENT_WEIGHT,
+        "volume_to_width": 0.0010,
+        "base_width": 0.0100,
+        "missing_policy": "refuse",
+        "require_full_scores": True,
+        "scorer_default": "fake_finbert_v1",
     },
     label="exploratory",
 )
@@ -208,8 +296,11 @@ REGISTRY: dict[str, ExperimentSpec] = {
     B0.experiment_id: B0,
     B1.experiment_id: B1,
     M0.experiment_id: M0,
+    M1.experiment_id: M1,
     K0.experiment_id: K0,
     T0.experiment_id: T0,
+    T1.experiment_id: T1,
+    T2.experiment_id: T2,
     N0.experiment_id: N0,
 }
 

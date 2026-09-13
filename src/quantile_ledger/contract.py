@@ -12,7 +12,9 @@ from quantile_ledger.errors import ForecastValidationError
 TARGET_LOG_RETURN = "log_return"
 FORECAST_SPACE_RETURN: Literal["return"] = "return"
 FEATURE_SET_MARKET_ONLY = "market_only"
+FEATURE_SET_MARKET_PLUS_NEWS_VOLUME = "market_plus_news_volume"
 FEATURE_SET_MARKET_PLUS_NEWS = "market_plus_news"
+FEATURE_SET_NEWS_ONLY = "news_only"
 FEATURE_VERSION_V1 = "v1"
 
 DEFAULT_QUANTILES: tuple[float, ...] = (0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
@@ -69,6 +71,7 @@ class ForecastContract(BaseModel):
     variant: str = "raw"
     is_synthetic: bool = False
     generation_metadata: dict[str, Any] = Field(default_factory=dict)
+    sentiment_context: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _check_invariants(self) -> ForecastContract:

@@ -181,7 +181,7 @@ def insert_forecast(conn: sqlite3.Connection, forecast: ForecastContract) -> str
                 calibration_method, calibration_version, parent_forecast_id,
                 random_seed, artifact_digest, generation_metadata_json
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?,
                 ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
@@ -198,6 +198,11 @@ def insert_forecast(conn: sqlite3.Connection, forecast: ForecastContract) -> str
                 validated.target_at,
                 model_version_id,
                 validated.variant,
+                (
+                    json.dumps(validated.sentiment_context, sort_keys=True)
+                    if validated.sentiment_context is not None
+                    else None
+                ),
                 validated.maximum_feature_timestamp,
                 validated.status,
                 1 if validated.is_synthetic else 0,
