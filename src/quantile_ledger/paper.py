@@ -25,6 +25,8 @@ PolicyStatus = Literal["draft", "frozen", "retired"]
 
 DEFAULT_POLICY_NAME = "underlying_long_flat"
 DEFAULT_POLICY_VERSION = "1"
+B1_CONTROL_POLICY_NAME = "b1_long_flat_control"
+B1_CONTROL_POLICY_VERSION = "1"
 
 
 def _d(value: str | Decimal) -> Decimal:
@@ -158,6 +160,24 @@ def default_underlying_policy(
         created_at=created_at or to_iso_utc(utc_now()),
         frozen_at=None,
         note="Conservative underlying long/flat; options deferred.",
+    )
+
+
+def default_b1_control_policy(
+    *,
+    policy_id: str | None = None,
+    created_at: str | None = None,
+) -> UnderlyingPaperPolicy:
+    """Same costs as underlying long/flat; B1-only signals for gate control."""
+    base = default_underlying_policy(policy_id=policy_id, created_at=created_at)
+    from dataclasses import replace
+
+    return replace(
+        base,
+        name=B1_CONTROL_POLICY_NAME,
+        version=B1_CONTROL_POLICY_VERSION,
+        challenger_experiment_ids=("B1",),
+        note="B1 paper control book for economic-value gate vs challengers.",
     )
 
 
@@ -908,6 +928,7 @@ __all__ = [
     "build_exit_fill",
     "compute_mark_equity",
     "decide_long_flat",
+    "default_b1_control_policy",
     "default_underlying_policy",
     "executable_buy_price",
     "executable_sell_price",

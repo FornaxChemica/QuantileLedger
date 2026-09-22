@@ -111,6 +111,37 @@ uv run ql experiment fetch-k0
 
 That downloads public MIT weights/source once into local `.ql/` (no API key).
 
+## Bars + evidence gate (Phase WF)
+
+Local import (offline tests/fixtures) and optional keyless Stooq **daily** fetch:
+
+```bash
+uv run ql data import-bars path/to/bars.json   # or .csv / .jsonl
+uv run ql data fetch --ticker SPY             # Stooq daily → .ql/cache/bars/
+uv run ql data status
+uv run ql experiment walk-forward --ticker SPY --experiment M0 --horizon-hours 24
+```
+
+Daily bars support gate horizons **24h** and **72h** only (1 / 3 trading days).
+Synthetic demo rows are **excluded** from the evidence gate.
+
+Paper books for economic-value delta (challenger vs B1 control):
+
+```bash
+uv run ql paper account-init --name challenger
+uv run ql paper account-init --name b1-control
+uv run ql paper policy-init && uv run ql paper policy-freeze <challenger-policy-id>
+uv run ql paper policy-init --b1-control && uv run ql paper policy-freeze <b1-policy-id>
+uv run ql paper gate-run \
+  --challenger-account <acct> --challenger-policy <id> \
+  --b1-account <acct> --b1-policy <id> --experiment M0
+uv run ql report gate --experiment M0 --challenger-account <acct> --b1-account <acct>
+```
+
+`ql report gate` prints `pass` / `fail` / `inconclusive`. It does **not** unlock
+Phase I (ensemble) or Phase J2 (options); those stay blocked until a human
+reviews a non-inconclusive gate with adequate `N`.
+
 ## Evaluation notes
 
 For P10–P90, nominal coverage is 80%. Coverage is always shown with width and

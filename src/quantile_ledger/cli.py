@@ -40,6 +40,8 @@ from quantile_ledger.errors import (
     InsufficientDataError,
     MalformedInputError,
     ModelUnavailableError,
+    PaperRiskRejectionError,
+    ProviderError,
     QuantileLedgerError,
 )
 from quantile_ledger.experiments import (
@@ -105,6 +107,9 @@ mechanical_app = typer.Typer(
 )
 demo_app = typer.Typer(help="Deterministic offline synthetic demo.")
 experiment_app = typer.Typer(help="Research-matrix experiment registry.")
+report_app = typer.Typer(
+    help="Local evaluation reports (Phase WF gate; no cloud upload)."
+)
 
 app.add_typer(watch_app, name="watch")
 app.add_typer(config_app, name="config")
@@ -116,6 +121,7 @@ app.add_typer(paper_app, name="paper")
 app.add_typer(mechanical_app, name="mechanical")
 app.add_typer(demo_app, name="demo")
 app.add_typer(experiment_app, name="experiment")
+app.add_typer(report_app, name="report")
 
 console = Console(stderr=False)
 err_console = Console(stderr=True)
@@ -235,12 +241,6 @@ def doctor_cmd(ctx: typer.Context) -> None:
 def nightly_cmd() -> None:
     """Run the local walk-forward job (Milestone 9)."""
     _milestone_stub("ql nightly", "Milestone 9")
-
-
-@app.command("report")
-def report_cmd() -> None:
-    """Generate a local evaluation report (Milestone 1+)."""
-    _milestone_stub("ql report", "Milestone 1")
 
 
 @app.command("signal")
@@ -495,6 +495,81 @@ def experiment_audit_h_cmd() -> None:
         "[dim]Raw parents immutable. Fit on validation issued_at only; "
         "children only on eval. Regimes = PIT realized-vol terciles with N.[/dim]"
     )
+
+
+@experiment_app.command("walk-forward")
+def experiment_walk_forward_cmd(
+    ctx: typer.Context,
+    ticker: Annotated[str, typer.Option("--ticker", help="Ticker with bars in DB.")],
+    experiment: Annotated[
+        str,
+        typer.Option("--experiment", help="Challenger: M0, T0, or K0."),
+    ] = "M0",
+    horizon_hours: Annotated[
+        int,
+        typer.Option("--horizon-hours", help="24 or 72 for daily bars."),
+    ] = 24,
+    interval: Annotated[str, typer.Option("--interval")] = "1d",
+    provider: Annotated[
+        str | None,
+        typer.Option("--provider", help="Optional bars.provider filter."),
+    ] = None,
+    max_issues: Annotated[
+        int | None,
+        typer.Option(
+            "--max-issues", help="Cap issuance count (chronological subsample)."
+        ),
+    ] = None,
+    allow_synthetic: Annotated[
+        bool,
+        typer.Option(
+            "--allow-synthetic",
+            help="Allow synthetic bars (excluded from gate by default).",
+        ),
+    ] = False,
+    train_epochs: Annotated[int, typer.Option("--train-epochs")] = 12,
+) -> None:
+    """Issue B1 + challenger on stored bars and settle from later bars."""
+    try:
+        from quantile_ledger.walk_forward import run_bars_walk_forward
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        initialize_database(settings.database_path)
+        with connection(settings.database_path) as conn:
+            result = run_bars_walk_forward(
+                conn,
+                ticker=ticker,
+                interval=interval,
+                horizon_hours=horizon_hours,
+                challenger_experiment_id=experiment,
+                provider=provider,
+                max_issues=max_issues,
+                train_epochs=train_epochs,
+                exclude_synthetic=not allow_synthetic,
+            )
+        console.print(
+            f"[green]Walk-forward[/green] ticker={result.ticker} "
+            f"challenger={result.challenger_experiment_id} "
+            f"horizon_h={result.horizon_hours} "
+            f"issued={result.issued} settled={result.settled} "
+            f"skipped={result.skipped_insufficient} "
+            f"synthetic_cohort={result.is_synthetic_cohort} "
+            f"run_id={result.run_id[:8]}…"
+        )
+        console.print(
+            "[dim]Next: freeze policies, ql mechanical run on challenger + B1 "
+            "accounts, then ql report gate.[/dim]"
+        )
+    except (
+        ConfigurationError,
+        DatabaseError,
+        InsufficientDataError,
+        MalformedInputError,
+        PaperRiskRejectionError,
+        ForecastValidationError,
+    ) as exc:
+        _fail(str(exc))
 
 
 @experiment_app.command("recalibrate")
@@ -1249,10 +1324,106 @@ def _fmt(value: object) -> str:
 
 @data_app.command("fetch")
 def data_fetch_cmd(
+    ctx: typer.Context,
     ticker: Annotated[str | None, typer.Option("--ticker")] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Re-download even if cache is fresh."),
+    ] = False,
 ) -> None:
-    _ = ticker
-    _milestone_stub("ql data fetch", "Milestone 2")
+    """Fetch keyless Stooq daily bars into local SQLite (no API key)."""
+    try:
+        from quantile_ledger.providers import fetch_bars
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        assert settings.cache_dir is not None
+        initialize_database(settings.database_path)
+        tickers = [ticker.upper()] if ticker else list(settings.watchlist)
+        with connection(settings.database_path) as conn:
+            for t in tickers:
+                result = fetch_bars(
+                    conn,
+                    t,
+                    cache_dir=settings.cache_dir,
+                    force=force,
+                    freshness_hours=settings.bar_freshness_hours,
+                )
+                console.print(
+                    f"[green]Fetched[/green] {result.ticker} "
+                    f"provider={result.provider} "
+                    f"from_cache={result.from_cache} "
+                    f"inserted={result.import_result.inserted} "
+                    f"updated={result.import_result.updated} "
+                    f"rows={result.import_result.total_rows}"
+                )
+        console.print(
+            "[dim]Stooq daily only (interval=1d). Gate horizons: 24h / 72h. "
+            "Cached under .ql/cache/bars/.[/dim]"
+        )
+    except (
+        ConfigurationError,
+        DatabaseError,
+        MalformedInputError,
+        ProviderError,
+        QuantileLedgerError,
+        OSError,
+    ) as exc:
+        _fail(str(exc))
+
+
+@data_app.command("import-bars")
+def data_import_bars_cmd(
+    ctx: typer.Context,
+    path: Annotated[Path, typer.Argument(help="Local CSV/JSON/JSONL OHLCV file.")],
+    synthetic: Annotated[
+        bool,
+        typer.Option(
+            "--synthetic",
+            help="Force is_synthetic=1 on imported rows (demo/fixtures).",
+        ),
+    ] = False,
+    interval: Annotated[
+        str,
+        typer.Option("--interval", help="Default interval when row omits it."),
+    ] = "1d",
+    provider: Annotated[
+        str,
+        typer.Option("--provider", help="Default provider label."),
+    ] = "local_import",
+) -> None:
+    """Import local OHLCV bars (no network). Idempotent upsert."""
+    try:
+        from quantile_ledger.bars import import_bars_file
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        initialize_database(settings.database_path)
+        with connection(settings.database_path) as conn:
+            result = import_bars_file(
+                conn,
+                path,
+                default_interval=interval,
+                default_provider=provider,
+                force_synthetic=synthetic,
+            )
+        console.print(
+            "[green]Imported bars[/green] "
+            f"inserted={result.inserted} "
+            f"updated={result.updated} "
+            f"rows={result.total_rows}"
+        )
+        if synthetic:
+            console.print(
+                "[dim]Labeled is_synthetic=1 — excluded from ql report gate.[/dim]"
+            )
+    except (
+        ConfigurationError,
+        DatabaseError,
+        MalformedInputError,
+        OSError,
+    ) as exc:
+        _fail(str(exc))
 
 
 @data_app.command("import-news")
@@ -1299,18 +1470,31 @@ def data_import_news_cmd(
 
 @data_app.command("status")
 def data_status_cmd(ctx: typer.Context) -> None:
-    """Show local news / sentiment row counts (no private paths)."""
+    """Show local bars / news / sentiment row counts (no private paths)."""
     try:
+        from quantile_ledger.bars import bars_counts
         from quantile_ledger.news import news_counts
 
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
         initialize_database(settings.database_path)
         with connection(settings.database_path) as conn:
-            counts = news_counts(conn)
+            news = news_counts(conn)
+            bars = bars_counts(conn)
         console.print(
-            f"news_items={counts['news_items']} "
-            f"news_sentiment={counts['news_sentiment']}"
+            f"bars_total={bars['bars_total']} "
+            f"bars_non_synthetic={bars['bars_non_synthetic']} "
+            f"bars_synthetic={bars['bars_synthetic']}"
+        )
+        for row in bars["by_provider_interval"]:
+            console.print(
+                f"  bars provider={row['provider']} interval={row['interval']} "
+                f"n={row['n']}"
+            )
+        for row in bars["by_ticker"]:
+            console.print(f"  bars ticker={row['ticker']} n={row['n']}")
+        console.print(
+            f"news_items={news['news_items']} news_sentiment={news['news_sentiment']}"
         )
     except (ConfigurationError, DatabaseError) as exc:
         _fail(str(exc))
@@ -1470,16 +1654,31 @@ def paper_account_init_cmd(
 
 
 @paper_app.command("policy-init")
-def paper_policy_init_cmd(ctx: typer.Context) -> None:
+def paper_policy_init_cmd(
+    ctx: typer.Context,
+    b1_control: Annotated[
+        bool,
+        typer.Option(
+            "--b1-control",
+            help="Insert B1-only control policy (same costs) for gate comparison.",
+        ),
+    ] = False,
+) -> None:
     """Insert the default underlying long/flat policy as draft."""
     try:
         from dataclasses import replace
 
-        from quantile_ledger.paper import default_underlying_policy, insert_policy
+        from quantile_ledger.paper import (
+            default_b1_control_policy,
+            default_underlying_policy,
+            insert_policy,
+        )
 
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
-        base = default_underlying_policy()
+        base = (
+            default_b1_control_policy() if b1_control else default_underlying_policy()
+        )
         policy = replace(
             base,
             half_spread_bps=settings.paper_equity_half_spread_bps,
@@ -1492,8 +1691,10 @@ def paper_policy_init_cmd(ctx: typer.Context) -> None:
         )
         with connection(settings.database_path) as conn:
             insert_policy(conn, policy)
+        kind = "B1 control" if b1_control else "challenger"
         console.print(
-            f"[green]Draft policy[/green] id={policy.policy_id} "
+            f"[green]Draft {kind} policy[/green] id={policy.policy_id} "
+            f"experiments={list(policy.challenger_experiment_ids)} "
             f"hash={policy.config_hash()[:12]} — freeze before forward tests"
         )
     except (ConfigurationError, DatabaseError, ValueError) as exc:
@@ -1944,3 +2145,118 @@ def mechanical_history_cmd(ctx: typer.Context) -> None:
 def mechanical_stats_cmd(ctx: typer.Context) -> None:
     """Alias: show paper cash / mid vs bid equity stats."""
     paper_stats_cmd(ctx)
+
+
+@report_app.command("gate")
+def report_gate_cmd(
+    ctx: typer.Context,
+    experiment: Annotated[
+        str,
+        typer.Option("--experiment", help="Challenger experiment id (e.g. M0)."),
+    ] = "M0",
+    ticker: Annotated[str | None, typer.Option("--ticker")] = None,
+    challenger_account: Annotated[
+        str | None,
+        typer.Option("--challenger-account", help="Paper account for challenger book."),
+    ] = None,
+    b1_account: Annotated[
+        str | None,
+        typer.Option("--b1-account", help="Paper account for B1 control book."),
+    ] = None,
+) -> None:
+    """Evidence gate: skill vs B1 and paper equity delta (excludes synthetic)."""
+    try:
+        from quantile_ledger.gate import evaluate_gate
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        if not settings.database_path.exists():
+            _fail("Database missing. Run: ql init")
+        with connection(settings.database_path) as conn:
+            report = evaluate_gate(
+                conn,
+                challenger_experiment_id=experiment,
+                min_metric_samples=settings.min_metric_samples,
+                ticker=ticker,
+                challenger_account_id=challenger_account,
+                b1_account_id=b1_account,
+            )
+        color = {
+            "pass": "green",
+            "fail": "red",
+            "inconclusive": "yellow",
+        }[report.status]
+        console.print(
+            f"[{color}]gate_status={report.status}[/{color}] "
+            f"challenger={report.challenger_experiment_id} "
+            f"paired_n={report.paired_n} "
+            f"min_n={report.min_metric_samples} "
+            f"synthetic_excluded={report.synthetic_excluded}"
+        )
+        console.print(
+            f"  skill_vs_B1={_fmt(report.skill_vs_b1)} "
+            f"coverage={_fmt(report.coverage)} "
+            f"mean_width={_fmt(report.mean_width)} "
+            f"approx_crps={_fmt(report.approx_crps)} "
+            f"pinball={_fmt(report.pinball)}"
+        )
+        console.print(
+            f"  challenger_equity_mid={report.challenger_equity_mid} "
+            f"b1_equity_mid={report.b1_equity_mid} "
+            f"equity_delta_mid={report.equity_delta_mid} "
+            f"fills_ch={report.challenger_fills} fills_b1={report.b1_fills}"
+        )
+        for reason in report.reasons:
+            console.print(f"  reason: {reason}")
+        console.print("[bold]Unlock checklist (human review; not automatic)[/bold]")
+        for item in report.checklist:
+            console.print(f"  • {item}")
+    except (ConfigurationError, DatabaseError) as exc:
+        _fail(str(exc))
+
+
+@paper_app.command("gate-run")
+def paper_gate_run_cmd(
+    ctx: typer.Context,
+    challenger_account: Annotated[str, typer.Option("--challenger-account")],
+    challenger_policy: Annotated[str, typer.Option("--challenger-policy")],
+    b1_account: Annotated[str, typer.Option("--b1-account")],
+    b1_policy: Annotated[str, typer.Option("--b1-policy")],
+    experiment: Annotated[str, typer.Option("--experiment")] = "M0",
+    exploratory: Annotated[
+        bool,
+        typer.Option("--exploratory", help="Mark decisions is_forward=0."),
+    ] = False,
+) -> None:
+    """Run mechanical long/flat for challenger and B1 control books."""
+    try:
+        from quantile_ledger.walk_forward import run_paper_gate_books
+
+        settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
+        assert settings.database_path is not None
+        with connection(settings.database_path) as conn:
+            result = run_paper_gate_books(
+                conn,
+                challenger_account_id=challenger_account,
+                challenger_policy_id=challenger_policy,
+                b1_account_id=b1_account,
+                b1_policy_id=b1_policy,
+                challenger_experiment_id=experiment,
+                is_forward=not exploratory,
+            )
+        ch = result["challenger"]
+        b1 = result["b1"]
+        console.print(
+            f"[green]Gate paper[/green] challenger decisions={ch.decisions} "
+            f"entries={ch.entries} exits={ch.exits} flats={ch.flats_recorded}"
+        )
+        console.print(
+            f"  B1 control decisions={b1.decisions} entries={b1.entries} "
+            f"exits={b1.exits} flats={b1.flats_recorded}"
+        )
+    except (
+        ConfigurationError,
+        DatabaseError,
+        PaperRiskRejectionError,
+    ) as exc:
+        _fail(str(exc))

@@ -17,7 +17,7 @@ sample size `N`.
 - Research **experiment M0** = MambaQuantile market-only (Phase A).
 - **K0 / T0** = Kronos and TFT-style **challengers** vs primary baseline **B1**.
 
-## Audit snapshot (2026-09-13)
+## Audit snapshot (2026-09-21)
 
 | Area | Status |
 |------|--------|
@@ -25,13 +25,16 @@ sample size `N`.
 | B0 / B1 baselines | Done |
 | M0, K0, T0 challengers (market-only) | Done (demo comparable) |
 | Experiment freeze / artifacts / provenance | Done |
-| Genuine forward walk-forward jobs | Partial (synthetic multi-day paper job; nightly `jobs.py` still stub) |
+| Bars ingest (local import + Stooq daily fetch) | **Done** (Phase WF / Milestone 2) |
+| Genuine forward walk-forward on stored bars | **Done** (`ql experiment walk-forward`; nightly still stub) |
+| Evidence gate report vs B1 (skill + paper) | **Done** (`ql report gate`; human review) |
 | Underlying long/flat paper policy | **Done** (J1: schema v5 marks + mechanical + forward-demo) |
 | Policy freeze before forward paper book | Done (API + CLI + mechanical runner) |
-| Forward paper P&L accumulation | Done (synthetic multi-day forward-demo + mid/bid equity curve) |
+| Forward paper P&L accumulation | Done (synthetic demo + bars gate books) |
 | News / FinBERT controlled ablations | **Done** (Phase F infra + Phase G T1/T2/M1/N0 ladder) |
 | Isotonic PIT recalibration + vol regimes | **Done** (Phase H: M0c/T0c/K0c, val/eval split) |
-| Options paper trading | **Blocked** until underlying economic-value evidence |
+| Ensemble E0 | **Blocked** until gate shows skill vs B1 with adequate N |
+| Options paper trading | **Blocked** until gate shows paper equity delta vs B1 |
 | Streamlit dashboard / nightly | Not started |
 
 ## Research / trading order (authoritative)
@@ -134,14 +137,28 @@ Ladder: **T1** = T0 + news volume; **T2** = T0 + volume + FinBERT; **M1** = M0 +
 `M0c`/`T0c`/`K0c` = isotonic PIT children (`variant=isotonic_v1`) of M0/T0/K0.
 Fit on validation `issued_at` only; apply on eval only. Regimes = PIT realized-vol
 terciles with N + coverage + width.
+
+## Phase WF — Genuine walk-forward evidence gate (Milestone 2)
+
+- [x] `bars` upsert + PIT `list_closes_as_of`
+- [x] `ql data import-bars` (CSV/JSON/JSONL; `--synthetic` for fixtures)
+- [x] Keyless Stooq daily fetch + `.ql/cache/bars/` (`ql data fetch`)
+- [x] Expanded `ql data status` (bars + news)
+- [x] `ql experiment walk-forward` on stored `1d` bars (horizons 24h / 72h)
+- [x] B1 control paper policy (`ql paper policy-init --b1-control`) + `ql paper gate-run`
+- [x] `ql report gate` (excludes synthetic; pass/fail/inconclusive; human unlock checklist)
+- [ ] Nightly scheduler / `jobs.py` (still Milestone 9)
+
+Gate does **not** auto-unlock Phase I or J2.
+
 ## Phase I — Ensemble E0
 
-- [ ] Only after validation gates on challengers vs B1
+- [ ] Only after validation gates on challengers vs B1 (`ql report gate` non-inconclusive + positive skill; human review)
 
 ## Phase J2 — Options paper (blocked)
 
 Blocked until J1 forward book shows **economic value** evidence
-(after costs, vs B1, with adequate N). Then:
+(after costs, vs B1, with adequate N) via `ql report gate` paper delta. Then:
 
 - [ ] Long calls / long puts only (unless scope changes again)
 - [ ] Option quote quality, spread caps, expiration backfill at historical spot
