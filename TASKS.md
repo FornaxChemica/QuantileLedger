@@ -28,14 +28,32 @@ sample size `N`.
 | Bars ingest (local import + Stooq daily fetch) | **Done** (Phase WF / Milestone 2) |
 | Genuine forward walk-forward on stored bars | **Done** (`ql experiment walk-forward`; nightly still stub) |
 | Evidence gate report vs B1 (skill + paper) | **Done** (`ql report gate`; human review) |
+| **First real evidence packet (M0 / SPY / 24h)** | **Done — gate_status=`fail`** (see below) |
 | Underlying long/flat paper policy | **Done** (J1: schema v5 marks + mechanical + forward-demo) |
 | Policy freeze before forward paper book | Done (API + CLI + mechanical runner) |
 | Forward paper P&L accumulation | Done (synthetic demo + bars gate books) |
 | News / FinBERT controlled ablations | **Done** (Phase F infra + Phase G T1/T2/M1/N0 ladder) |
 | Isotonic PIT recalibration + vol regimes | **Done** (Phase H: M0c/T0c/K0c, val/eval split) |
-| Ensemble E0 | **Blocked** until gate shows skill vs B1 with adequate N |
-| Options paper trading | **Blocked** until gate shows paper equity delta vs B1 |
+| Ensemble E0 | **Blocked** (M0 skill vs B1 ≤ 0 at N=40) |
+| Options paper trading | **Blocked** (M0 `equity_delta_mid` ≤ 0 at N=40) |
 | Streamlit dashboard / nightly | Not started |
+
+### Evidence packet (2026-09-21) — human review
+
+Local DB: `.ql-evidence/` (gitignored). Report copy:
+`.ql-evidence/reports/gate_M0_SPY_24h_2026-09-21.txt`.
+
+- **Bars:** Stooq keyless urllib blocked (JS PoW / Access denied). Used **Yahoo**
+  chart API (keyless) → `ql data import-bars` (`provider=yahoo`,
+  `is_synthetic=0`); watchlist 5×2512 daily bars.
+- **Walk-forward:** M0 + B1 on SPY, horizon 24h, `--max-issues 40`,
+  `issued=80` / `settled=80`, non-synthetic.
+- **Paper:** policy v2 (`shares_per_entry=5`, `max_notional=10000`; v1 10/5000
+  rejected SPY notional). Challenger vs B1 control books + last-fill marks.
+- **Gate:** `fail` · `paired_n=40` · `skill_vs_B1=-0.311` · coverage=0.675 ·
+  mean_width=0.039 · `equity_delta_mid=-3657.12` (fills ch=4 / b1=7).
+- **Unlock:** Phase **I** and **J2** stay blocked. Negative result with adequate
+  N is valid. Optional later evidence: T0, 72h, more tickers — not E0/options.
 
 ## Research / trading order (authoritative)
 
@@ -154,11 +172,14 @@ Gate does **not** auto-unlock Phase I or J2.
 ## Phase I — Ensemble E0
 
 - [ ] Only after validation gates on challengers vs B1 (`ql report gate` non-inconclusive + positive skill; human review)
+- **2026-09-21:** M0 SPY 24h gate `fail` (skill ≤ 0, N=40) — **not unlocked**
 
 ## Phase J2 — Options paper (blocked)
 
 Blocked until J1 forward book shows **economic value** evidence
-(after costs, vs B1, with adequate N) via `ql report gate` paper delta. Then:
+(after costs, vs B1, with adequate N) via `ql report gate` paper delta.
+**2026-09-21:** M0 SPY 24h `equity_delta_mid` ≤ 0 at N=40 — **not unlocked**.
+Then:
 
 - [ ] Long calls / long puts only (unless scope changes again)
 - [ ] Option quote quality, spread caps, expiration backfill at historical spot

@@ -21,6 +21,7 @@ htmlcov/
 
 # Application local data (never commit)
 .ql/
+.ql-evidence/
 *.db
 *.db-journal
 *.db-wal
