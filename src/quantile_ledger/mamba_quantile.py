@@ -48,9 +48,13 @@ class MambaQuantileModel:
     log_delta: list[float]
     b_gate: list[float]
     c_out: list[float]
-    # quantile heads: bias + scale on final state mean
-    q_bias: list[float]
-    q_scale: list[float]
+    # Quantile head: location = center + z_gain * readout; the per-level
+    # ``q_offset`` carries the *spread* and is learned directly so that the
+    # interval width never collapses when the SSM readout ``z`` is near zero
+    # (which is the normal case for small log returns).
+    center: float
+    z_gain: float
+    q_offset: list[float]
 
     @classmethod
     def create(
@@ -71,8 +75,9 @@ class MambaQuantileModel:
             log_delta=[rng.uniform(-2.0, 0.0) for _ in range(state_dim)],
             b_gate=[rng.uniform(-0.5, 0.5) for _ in range(state_dim)],
             c_out=[rng.uniform(-0.5, 0.5) for _ in range(state_dim)],
-            q_bias=[0.0 for _ in levels],
-            q_scale=[0.05 + 0.02 * i for i in range(len(levels))],
+            center=0.0,
+            z_gain=1.0,
+            q_offset=_initial_offsets(levels),
         )
 
     def encode(self, window: Sequence[float]) -> float:
@@ -92,7 +97,8 @@ class MambaQuantileModel:
 
     def predict_quantiles(self, window: Sequence[float]) -> list[float]:
         z = self.encode(window)
-        raw = [b + s * z for b, s in zip(self.q_bias, self.q_scale, strict=True)]
+        location = self.center + self.z_gain * z
+        raw = [location + off for off in self.q_offset]
         # Enforce non-decreasing via isotonic projection (explicit, versioned).
         return _isotonic_increasing(raw)
 
@@ -107,28 +113,50 @@ class MambaQuantileModel:
         if len(windows) != len(targets) or not windows:
             msg = "train requires non-empty paired windows/targets"
             raise InsufficientDataError(msg)
+        n = len(windows)
         last_loss = 0.0
         for _ in range(epochs):
             total = 0.0
-            # Finite-difference gradient on biases/scales (stable, dependency-free).
             for window, y in zip(windows, targets, strict=True):
                 pred = self.predict_quantiles(window)
                 for qi, q in enumerate(self.quantile_levels):
                     total += pinball_loss(y, pred[qi], q)
-            last_loss = total / (len(windows) * len(self.quantile_levels))
-            # Coordinate steps on q_bias / q_scale using pinball subgradient.
+            last_loss = total / (n * len(self.quantile_levels))
+            # Batch pinball subgradient steps with location/spread decoupled.
+            # The location (center + z_gain * z) is driven only by the median
+            # quantile, so it tracks the conditional center. Each ``q_offset``
+            # is driven by its own quantile's subgradient relative to that
+            # median, so it learns the spread directly. The spread therefore
+            # stays genuine regardless of the readout magnitude and does not
+            # fight the location for the P50 level.
+            mid_i = _median_index(self.quantile_levels)
+            center_grad = 0.0
+            z_gain_grad = 0.0
+            offset_grad = [0.0] * len(self.quantile_levels)
             for window, y in zip(windows, targets, strict=True):
                 z = self.encode(window)
                 pred = self.predict_quantiles(window)
+                g_mid = _pinball_subgrad(y, pred[mid_i], self.quantile_levels[mid_i])
+                center_grad += g_mid
+                z_gain_grad += g_mid * z
                 for qi, q in enumerate(self.quantile_levels):
-                    err = y - pred[qi]
-                    # subgradient of pinball w.r.t. prediction
-                    dpred = -q if err >= 0 else -(q - 1.0)
-                    self.q_bias[qi] -= learning_rate * dpred
-                    self.q_scale[qi] -= learning_rate * dpred * z
-            # Keep scales positive-ish for ordering stability.
-            self.q_scale = [max(1e-4, s) for s in self.q_scale]
-        return {"mean_pinball": last_loss, "n": float(len(windows))}
+                    offset_grad[qi] += _pinball_subgrad(y, pred[qi], q)
+            self.center -= learning_rate * center_grad / n
+            self.z_gain -= learning_rate * z_gain_grad / n
+            for qi in range(len(self.quantile_levels)):
+                self.q_offset[qi] -= learning_rate * offset_grad[qi] / n
+            # Keep offsets monotone (non-decreasing in quantile level) so the
+            # fan cannot invert; this preserves a genuine, non-zero spread.
+            self.q_offset = _isotonic_increasing(self.q_offset)
+            # Pin the median offset to zero so the center owns the location.
+            self._recenter_offsets()
+        return {"mean_pinball": last_loss, "n": float(n)}
+
+    def _recenter_offsets(self) -> None:
+        mid_i = _median_index(self.quantile_levels)
+        shift = self.q_offset[mid_i]
+        self.center += shift
+        self.q_offset = [off - shift for off in self.q_offset]
 
     def artifact_digest(self) -> str:
         return hashlib.sha256(
@@ -144,8 +172,9 @@ class MambaQuantileModel:
             "log_delta": list(self.log_delta),
             "b_gate": list(self.b_gate),
             "c_out": list(self.c_out),
-            "q_bias": list(self.q_bias),
-            "q_scale": list(self.q_scale),
+            "center": self.center,
+            "z_gain": self.z_gain,
+            "q_offset": list(self.q_offset),
             "backbone": "diagonal_selective_ssm_numpy",
         }
 
@@ -168,8 +197,9 @@ class MambaQuantileModel:
             log_delta=_floats("log_delta"),
             b_gate=_floats("b_gate"),
             c_out=_floats("c_out"),
-            q_bias=_floats("q_bias"),
-            q_scale=_floats("q_scale"),
+            center=float(str(payload["center"])),
+            z_gain=float(str(payload["z_gain"])),
+            q_offset=_floats("q_offset"),
         )
 
 
@@ -192,6 +222,91 @@ class _RNG:
 
     def uniform(self, a: float, b: float) -> float:
         return a + (b - a) * self.random()
+
+
+def _normal_ppf(p: float) -> float:
+    """Inverse standard-normal CDF (Acklam rational approximation)."""
+    if not 0.0 < p < 1.0:
+        msg = "quantile level must be strictly between 0 and 1"
+        raise ValueError(msg)
+    a = (
+        -3.969683028665376e01,
+        2.209460984245205e02,
+        -2.759285104469687e02,
+        1.383577518672690e02,
+        -3.066479806614716e01,
+        2.506628277459239e00,
+    )
+    b = (
+        -5.447609879822406e01,
+        1.615858368580409e02,
+        -1.556989798598866e02,
+        6.680131188771972e01,
+        -1.328068155288572e01,
+    )
+    c = (
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e00,
+        -2.549732539343734e00,
+        4.374664141464968e00,
+        2.938163982698783e00,
+    )
+    d = (
+        7.784695709041462e-03,
+        3.224671290700398e-01,
+        2.445134137142996e00,
+        3.754408661907416e00,
+    )
+    plow = 0.02425
+    phigh = 1.0 - plow
+    if p < plow:
+        q = math.sqrt(-2.0 * math.log(p))
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+            (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+        )
+    if p > phigh:
+        q = math.sqrt(-2.0 * math.log(1.0 - p))
+        return -(
+            ((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]
+        ) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+    q = p - 0.5
+    r = q * q
+    return (
+        (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5])
+        * q
+        / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+    )
+
+
+def _pinball_subgrad(actual: float, prediction: float, quantile: float) -> float:
+    """Subgradient of pinball loss w.r.t. the prediction."""
+    err = actual - prediction
+    return -quantile if err >= 0 else -(quantile - 1.0)
+
+
+def _median_index(levels: Sequence[float]) -> int:
+    """Index of the quantile level closest to 0.5 (the location anchor)."""
+    best_i = 0
+    best_d = abs(levels[0] - 0.5)
+    for i, q in enumerate(levels):
+        d = abs(q - 0.5)
+        if d < best_d:
+            best_d = d
+            best_i = i
+    return best_i
+
+
+def _initial_offsets(
+    levels: Sequence[float], *, base_sigma: float = 0.01
+) -> list[float]:
+    """Seed the quantile spread fan from a Gaussian with daily-return sigma.
+
+    Starting the offsets at a realistic, non-degenerate spread gives training a
+    sensible interval to refine instead of growing one from zero. Pinball
+    training then widens or narrows each tail from this starting fan.
+    """
+    return [base_sigma * _normal_ppf(q) for q in levels]
 
 
 def _isotonic_increasing(values: Sequence[float]) -> list[float]:

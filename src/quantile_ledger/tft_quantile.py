@@ -26,7 +26,12 @@ from quantile_ledger.contract import (
 )
 from quantile_ledger.errors import ForecastValidationError, InsufficientDataError
 from quantile_ledger.experiments import T0
-from quantile_ledger.mamba_quantile import build_supervised_windows
+from quantile_ledger.mamba_quantile import (
+    _initial_offsets,
+    _median_index,
+    _pinball_subgrad,
+    build_supervised_windows,
+)
 from quantile_ledger.metrics import pinball_loss
 from quantile_ledger.timeutil import to_iso_utc, utc_now
 
@@ -84,9 +89,13 @@ class TemporalFusionQuantileModel:
     attn_q: list[float]
     attn_k: list[float]
     attn_v: list[float]
-    # Quantile heads on context mean.
-    q_bias: list[float]
-    q_scale: list[float]
+    # Quantile head: location = center + z_gain * attention_context; each
+    # ``q_offset`` learns the spread of its own quantile directly so interval
+    # width is data-driven and does not collapse when the context readout is
+    # near zero.
+    center: float
+    z_gain: float
+    q_offset: list[float]
 
     @classmethod
     def create(
@@ -109,8 +118,9 @@ class TemporalFusionQuantileModel:
             attn_q=[rng.uniform(-0.4, 0.4) for _ in range(hidden_dim)],
             attn_k=[rng.uniform(-0.4, 0.4) for _ in range(hidden_dim)],
             attn_v=[rng.uniform(-0.4, 0.4) for _ in range(hidden_dim)],
-            q_bias=[0.0 for _ in levels],
-            q_scale=[0.04 + 0.015 * i for i in range(len(levels))],
+            center=0.0,
+            z_gain=1.0,
+            q_offset=_initial_offsets(levels),
         )
 
     def encode(self, window: Sequence[float]) -> float:
@@ -144,7 +154,8 @@ class TemporalFusionQuantileModel:
 
     def predict_quantiles(self, window: Sequence[float]) -> list[float]:
         z = self.encode(window)
-        raw = [b + s * z for b, s in zip(self.q_bias, self.q_scale, strict=True)]
+        location = self.center + self.z_gain * z
+        raw = [location + off for off in self.q_offset]
         return _isotonic_increasing(raw)
 
     def train(
@@ -158,6 +169,7 @@ class TemporalFusionQuantileModel:
         if len(windows) != len(targets) or not windows:
             msg = "train requires non-empty paired windows/targets"
             raise InsufficientDataError(msg)
+        n = len(windows)
         last_loss = 0.0
         for _ in range(epochs):
             total = 0.0
@@ -165,16 +177,32 @@ class TemporalFusionQuantileModel:
                 pred = self.predict_quantiles(window)
                 for qi, q in enumerate(self.quantile_levels):
                     total += pinball_loss(y, pred[qi], q)
-            last_loss = total / (len(windows) * len(self.quantile_levels))
+            last_loss = total / (n * len(self.quantile_levels))
+            # Decoupled location/spread pinball steps: the location (center +
+            # z_gain * z) is driven by the median quantile only; each offset by
+            # its own quantile. The fan is projected monotone so interval width
+            # stays genuine instead of collapsing to zero.
+            mid_i = _median_index(self.quantile_levels)
+            center_grad = 0.0
+            z_gain_grad = 0.0
+            offset_grad = [0.0] * len(self.quantile_levels)
             for window, y in zip(windows, targets, strict=True):
                 z = self.encode(window)
                 pred = self.predict_quantiles(window)
+                g_mid = _pinball_subgrad(y, pred[mid_i], self.quantile_levels[mid_i])
+                center_grad += g_mid
+                z_gain_grad += g_mid * z
                 for qi, q in enumerate(self.quantile_levels):
-                    err = y - pred[qi]
-                    dpred = -q if err >= 0 else -(q - 1.0)
-                    self.q_bias[qi] -= learning_rate * dpred
-                    self.q_scale[qi] -= learning_rate * dpred * z
-            self.q_scale = [max(1e-4, s) for s in self.q_scale]
+                    offset_grad[qi] += _pinball_subgrad(y, pred[qi], q)
+            self.center -= learning_rate * center_grad / n
+            self.z_gain -= learning_rate * z_gain_grad / n
+            for qi in range(len(self.quantile_levels)):
+                self.q_offset[qi] -= learning_rate * offset_grad[qi] / n
+            self.q_offset = _isotonic_increasing(self.q_offset)
+            # Pin the median offset to zero so the center owns the location.
+            shift = self.q_offset[mid_i]
+            self.center += shift
+            self.q_offset = [off - shift for off in self.q_offset]
             # Light gate updates toward recent residual signal.
             for window, y in zip(windows, targets, strict=True):
                 mid = self.predict_quantiles(window)[len(self.quantile_levels) // 2]
@@ -182,7 +210,7 @@ class TemporalFusionQuantileModel:
                 for i, x in enumerate(window):
                     self.gate_w[i] -= learning_rate * 0.01 * resid * x
                     self.gate_b[i] -= learning_rate * 0.01 * resid
-        return {"mean_pinball": last_loss, "n": float(len(windows))}
+        return {"mean_pinball": last_loss, "n": float(n)}
 
     def artifact_digest(self) -> str:
         return hashlib.sha256(
@@ -202,8 +230,9 @@ class TemporalFusionQuantileModel:
             "attn_q": list(self.attn_q),
             "attn_k": list(self.attn_k),
             "attn_v": list(self.attn_v),
-            "q_bias": list(self.q_bias),
-            "q_scale": list(self.q_scale),
+            "center": self.center,
+            "z_gain": self.z_gain,
+            "q_offset": list(self.q_offset),
             "backbone": BACKBONE,
         }
 
@@ -228,8 +257,9 @@ class TemporalFusionQuantileModel:
             attn_q=_floats("attn_q"),
             attn_k=_floats("attn_k"),
             attn_v=_floats("attn_v"),
-            q_bias=_floats("q_bias"),
-            q_scale=_floats("q_scale"),
+            center=float(str(payload["center"])),
+            z_gain=float(str(payload["z_gain"])),
+            q_offset=_floats("q_offset"),
         )
 
 
