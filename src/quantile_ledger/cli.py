@@ -69,8 +69,8 @@ from quantile_ledger.forecast_store import (
 )
 from quantile_ledger.forecasting import run_baselines
 from quantile_ledger.kronos_quantile import (
-    FakeKronosSampler,
     KronosLocalPaths,
+    build_kronos_sampler,
     closes_to_ohlc_bars,
     fetch_kronos_assets,
     issue_k0_forecast,
@@ -528,14 +528,37 @@ def experiment_walk_forward_cmd(
         ),
     ] = False,
     train_epochs: Annotated[int, typer.Option("--train-epochs")] = 12,
+    backend: Annotated[
+        str,
+        typer.Option(
+            "--backend",
+            help="K0 sampler backend: 'fake' (offline, default) or 'real'.",
+        ),
+    ] = "fake",
+    training_mode: Annotated[
+        str,
+        typer.Option(
+            "--training-mode",
+            help=(
+                "M0/T0 fitting: 'per_issuance' (default, retrain each issuance) "
+                "or 'fit_once' (train once, reuse; required for heavy models)."
+            ),
+        ),
+    ] = "per_issuance",
 ) -> None:
     """Issue B1 + challenger on stored bars and settle from later bars."""
     try:
+        from quantile_ledger.kronos_quantile import KronosLocalPaths
         from quantile_ledger.walk_forward import run_bars_walk_forward
+
+        if training_mode not in ("per_issuance", "fit_once"):
+            _fail("--training-mode must be 'per_issuance' or 'fit_once'")
 
         settings = load_settings(data_dir=ctx.obj.get("data_dir")).resolve_paths()
         assert settings.database_path is not None
+        assert settings.data_dir is not None
         initialize_database(settings.database_path)
+        kronos_paths = KronosLocalPaths.under(settings.data_dir)
         with connection(settings.database_path) as conn:
             result = run_bars_walk_forward(
                 conn,
@@ -547,6 +570,10 @@ def experiment_walk_forward_cmd(
                 max_issues=max_issues,
                 train_epochs=train_epochs,
                 exclude_synthetic=not allow_synthetic,
+                kronos_backend=backend,
+                kronos_paths=kronos_paths,
+                training_mode=training_mode,  # type: ignore[arg-type]
+                model_dir=settings.model_dir,
             )
         console.print(
             f"[green]Walk-forward[/green] ticker={result.ticker} "
@@ -925,7 +952,15 @@ def demo_load_cmd(ctx: typer.Context) -> None:
             payload=t0_model.to_dict(),
             filename_stem="t0-demo",
         )
-        k0_sampler = FakeKronosSampler(lookback=k0_lookback)
+        # The demo is deterministic, offline, and synthetic-only, so K0 always
+        # uses the fake sampler here. Real Kronos is exercised via
+        # `ql experiment walk-forward --backend real` on real bars.
+        assert settings.data_dir is not None
+        k0_sampler = build_kronos_sampler(
+            "fake",
+            paths=KronosLocalPaths.under(settings.data_dir),
+            lookback=k0_lookback,
+        )
 
         val_vols: list[float] = []
         for idx, ts in zip(issue_indices, issued_ats, strict=True):

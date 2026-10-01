@@ -17,8 +17,9 @@ from quantile_ledger.bars import (
 )
 from quantile_ledger.cli import app
 from quantile_ledger.db import connection, initialize_database
-from quantile_ledger.errors import MalformedInputError
+from quantile_ledger.errors import MalformedInputError, ModelUnavailableError
 from quantile_ledger.gate import evaluate_gate
+from quantile_ledger.kronos_quantile import KronosLocalPaths
 from quantile_ledger.paper import (
     default_b1_control_policy,
     default_underlying_policy,
@@ -159,6 +160,306 @@ def test_walk_forward_and_gate_inconclusive(tmp_path: Path) -> None:
         assert report.status == "inconclusive"
         assert report.paired_n == 5
         assert report.synthetic_excluded == 0
+
+
+def test_walk_forward_k0_fake_backend(tmp_path: Path) -> None:
+    db = tmp_path / "k0wf.db"
+    initialize_database(db)
+    with connection(db) as conn:
+        import_bars_file(
+            conn,
+            SPY_JSON,
+            default_provider=PROVIDER_FIXTURE,
+            force_synthetic=False,
+        )
+        wf = run_bars_walk_forward(
+            conn,
+            ticker="SPY",
+            interval="1d",
+            horizon_hours=24,
+            challenger_experiment_id="K0",
+            provider=PROVIDER_FIXTURE,
+            lookback=16,
+            max_issues=5,
+            min_b1_samples=20,
+            min_model_samples=20,
+            exclude_synthetic=True,
+            kronos_backend="fake",
+            kronos_paths=KronosLocalPaths.under(tmp_path / "ql"),
+        )
+        assert wf.challenger_experiment_id == "K0"
+        assert wf.issued == 10  # 5 issues * (B1 + K0)
+        assert wf.settled == 10
+
+
+def test_walk_forward_k0_real_backend_refuses_without_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Selecting the real K0 backend without local weights fails clearly."""
+    import quantile_ledger.kronos_quantile as kq
+
+    # Stub deps-present so the refusal is specifically about the missing bundle
+    # (deterministic whether or not the optional [ml] extra is installed).
+    monkeypatch.setattr(kq, "require_kronos_runtime_deps", lambda: None)
+    monkeypatch.setattr(kq, "kronos_bundle_ready", lambda _paths: False)
+
+    db = tmp_path / "k0real.db"
+    initialize_database(db)
+    with connection(db) as conn:
+        import_bars_file(
+            conn,
+            SPY_JSON,
+            default_provider=PROVIDER_FIXTURE,
+            force_synthetic=False,
+        )
+        with pytest.raises(ModelUnavailableError, match="fetch-k0"):
+            run_bars_walk_forward(
+                conn,
+                ticker="SPY",
+                interval="1d",
+                horizon_hours=24,
+                challenger_experiment_id="K0",
+                provider=PROVIDER_FIXTURE,
+                lookback=16,
+                max_issues=3,
+                min_b1_samples=20,
+                min_model_samples=20,
+                exclude_synthetic=True,
+                kronos_backend="real",
+                kronos_paths=KronosLocalPaths.under(tmp_path / "ql"),
+            )
+
+
+def test_walk_forward_k0_real_backend_requires_paths(tmp_path: Path) -> None:
+    db = tmp_path / "k0nopaths.db"
+    initialize_database(db)
+    with connection(db) as conn:
+        import_bars_file(
+            conn,
+            SPY_JSON,
+            default_provider=PROVIDER_FIXTURE,
+            force_synthetic=False,
+        )
+        with pytest.raises(MalformedInputError, match="kronos_paths"):
+            run_bars_walk_forward(
+                conn,
+                ticker="SPY",
+                interval="1d",
+                horizon_hours=24,
+                challenger_experiment_id="K0",
+                provider=PROVIDER_FIXTURE,
+                lookback=16,
+                max_issues=3,
+                min_b1_samples=20,
+                min_model_samples=20,
+                exclude_synthetic=True,
+                kronos_backend="real",
+                kronos_paths=None,
+            )
+
+
+def test_fit_once_trains_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fit_once must call the trainer exactly once, not once per issuance."""
+    import quantile_ledger.walk_forward as wf_mod
+
+    calls = {"n": 0}
+    real_train = wf_mod.train_t0_model
+
+    def counting_train(*args: object, **kwargs: object) -> object:
+        calls["n"] += 1
+        return real_train(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(wf_mod, "train_t0_model", counting_train)
+
+    db = tmp_path / "fitonce.db"
+    initialize_database(db)
+    with connection(db) as conn:
+        import_bars_file(
+            conn,
+            SPY_JSON,
+            default_provider=PROVIDER_FIXTURE,
+            force_synthetic=False,
+        )
+        wf = wf_mod.run_bars_walk_forward(
+            conn,
+            ticker="SPY",
+            interval="1d",
+            horizon_hours=24,
+            challenger_experiment_id="T0",
+            provider=PROVIDER_FIXTURE,
+            lookback=16,
+            train_epochs=3,
+            max_issues=5,
+            min_b1_samples=20,
+            min_model_samples=20,
+            exclude_synthetic=True,
+            training_mode="fit_once",
+            model_dir=tmp_path / "models",
+        )
+    assert wf.issued == 10  # 5 * (B1 + T0)
+    assert wf.settled == 10
+    assert calls["n"] == 1, f"fit_once trained {calls['n']} times, expected 1"
+
+
+def test_per_issuance_trains_each_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """per_issuance (default) retrains per issuance — the contrast to fit_once."""
+    import quantile_ledger.walk_forward as wf_mod
+
+    calls = {"n": 0}
+    real_train = wf_mod.train_t0_model
+
+    def counting_train(*args: object, **kwargs: object) -> object:
+        calls["n"] += 1
+        return real_train(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(wf_mod, "train_t0_model", counting_train)
+
+    db = tmp_path / "periss.db"
+    initialize_database(db)
+    with connection(db) as conn:
+        import_bars_file(
+            conn,
+            SPY_JSON,
+            default_provider=PROVIDER_FIXTURE,
+            force_synthetic=False,
+        )
+        wf_mod.run_bars_walk_forward(
+            conn,
+            ticker="SPY",
+            interval="1d",
+            horizon_hours=24,
+            challenger_experiment_id="T0",
+            provider=PROVIDER_FIXTURE,
+            lookback=16,
+            train_epochs=3,
+            max_issues=5,
+            min_b1_samples=20,
+            min_model_samples=20,
+            exclude_synthetic=True,
+            training_mode="per_issuance",
+        )
+    assert calls["n"] == 5, f"per_issuance trained {calls['n']} times, expected 5"
+
+
+def test_fit_once_pit_safe_and_monotone(tmp_path: Path) -> None:
+    """Every fit_once forecast has training_cutoff <= issued_at and no crossing."""
+    db = tmp_path / "fitpit.db"
+    initialize_database(db)
+    with connection(db) as conn:
+        import_bars_file(
+            conn,
+            SPY_JSON,
+            default_provider=PROVIDER_FIXTURE,
+            force_synthetic=False,
+        )
+        run_bars_walk_forward(
+            conn,
+            ticker="SPY",
+            interval="1d",
+            horizon_hours=24,
+            challenger_experiment_id="M0",
+            provider=PROVIDER_FIXTURE,
+            lookback=16,
+            train_epochs=3,
+            max_issues=5,
+            min_b1_samples=20,
+            min_model_samples=20,
+            exclude_synthetic=True,
+            training_mode="fit_once",
+            model_dir=tmp_path / "models",
+        )
+        rows = conn.execute(
+            """
+            SELECT f.forecast_id, f.training_cutoff, f.issued_at, f.target_at
+            FROM forecasts f WHERE f.experiment_id = 'M0'
+            """,
+        ).fetchall()
+        assert rows, "no M0 forecasts issued"
+        for row in rows:
+            assert row["training_cutoff"] <= row["issued_at"], "PIT violation"
+            assert row["target_at"] > row["issued_at"], "target not strictly future"
+            # Quantiles live in forecast_quantiles; verify non-crossing per row.
+            qvals = [
+                r["return_value"]
+                for r in conn.execute(
+                    "SELECT return_value FROM forecast_quantiles "
+                    "WHERE forecast_id = ? ORDER BY q",
+                    (row["forecast_id"],),
+                ).fetchall()
+            ]
+            assert qvals, "no quantiles stored"
+            assert all(
+                qvals[i] <= qvals[i + 1] + 1e-9 for i in range(len(qvals) - 1)
+            ), "quantiles cross"
+
+
+def test_fit_once_registers_artifact(tmp_path: Path) -> None:
+    """fit_once with a model_dir persists and registers a weights artifact."""
+    db = tmp_path / "fitart.db"
+    model_dir = tmp_path / "models"
+    initialize_database(db)
+    with connection(db) as conn:
+        import_bars_file(
+            conn,
+            SPY_JSON,
+            default_provider=PROVIDER_FIXTURE,
+            force_synthetic=False,
+        )
+        run_bars_walk_forward(
+            conn,
+            ticker="SPY",
+            interval="1d",
+            horizon_hours=24,
+            challenger_experiment_id="T0",
+            provider=PROVIDER_FIXTURE,
+            lookback=16,
+            train_epochs=3,
+            max_issues=4,
+            min_b1_samples=20,
+            min_model_samples=20,
+            exclude_synthetic=True,
+            training_mode="fit_once",
+            model_dir=model_dir,
+        )
+        art = conn.execute(
+            "SELECT kind, experiment_id, metadata_json FROM artifacts "
+            "WHERE experiment_id = 'T0'",
+        ).fetchone()
+        assert art is not None
+        assert art["kind"] == "t0_weights"
+        assert "fit_once" in art["metadata_json"]
+    assert model_dir.is_dir() and any(model_dir.iterdir())
+
+
+def test_invalid_training_mode_rejected(tmp_path: Path) -> None:
+    db = tmp_path / "badmode.db"
+    initialize_database(db)
+    with connection(db) as conn:
+        import_bars_file(
+            conn,
+            SPY_JSON,
+            default_provider=PROVIDER_FIXTURE,
+            force_synthetic=False,
+        )
+        with pytest.raises(MalformedInputError, match="training_mode"):
+            run_bars_walk_forward(
+                conn,
+                ticker="SPY",
+                interval="1d",
+                horizon_hours=24,
+                challenger_experiment_id="M0",
+                provider=PROVIDER_FIXTURE,
+                lookback=16,
+                max_issues=3,
+                min_b1_samples=20,
+                min_model_samples=20,
+                exclude_synthetic=True,
+                training_mode="whenever",  # type: ignore[arg-type]
+            )
 
 
 def test_gate_excludes_synthetic(tmp_path: Path) -> None:

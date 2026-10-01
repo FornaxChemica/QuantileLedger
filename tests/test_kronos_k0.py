@@ -16,6 +16,7 @@ from quantile_ledger.kronos_quantile import (
     FakeKronosSampler,
     KronosLocalPaths,
     RealKronosSampler,
+    build_kronos_sampler,
     closes_to_ohlc_bars,
     empirical_quantile,
     issue_k0_forecast,
@@ -149,3 +150,59 @@ def test_require_deps_message_when_missing() -> None:
         require_kronos_runtime_deps()
     except ModelUnavailableError as exc:
         assert "uv sync --extra ml" in str(exc)
+
+
+def test_build_kronos_sampler_fake_offline(tmp_path: Path) -> None:
+    paths = KronosLocalPaths.under(tmp_path)
+    sampler = build_kronos_sampler("fake", paths=paths, lookback=64)
+    assert isinstance(sampler, FakeKronosSampler)
+    assert sampler.lookback == 64
+
+
+def test_build_kronos_sampler_fake_is_case_insensitive(tmp_path: Path) -> None:
+    paths = KronosLocalPaths.under(tmp_path)
+    sampler = build_kronos_sampler("  FAKE ", paths=paths, lookback=32)
+    assert isinstance(sampler, FakeKronosSampler)
+
+
+def test_build_kronos_sampler_unknown_backend(tmp_path: Path) -> None:
+    paths = KronosLocalPaths.under(tmp_path)
+    with pytest.raises(ModelUnavailableError) as exc:
+        build_kronos_sampler("gpu-magic", paths=paths, lookback=64)
+    assert "unknown Kronos backend" in str(exc.value)
+
+
+def test_build_kronos_sampler_real_refuses_without_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real backend must refuse clearly when the local weight bundle is absent.
+
+    Deps are stubbed present so the test is deterministic whether or not the
+    optional [ml] extra is installed in the environment.
+    """
+    import quantile_ledger.kronos_quantile as kq
+
+    monkeypatch.setattr(kq, "require_kronos_runtime_deps", lambda: None)
+    monkeypatch.setattr(kq, "kronos_bundle_ready", lambda _paths: False)
+    paths = KronosLocalPaths.under(tmp_path)
+    with pytest.raises(ModelUnavailableError) as exc:
+        kq.build_kronos_sampler("real", paths=paths, lookback=400)
+    assert "ql experiment fetch-k0" in str(exc.value)
+
+
+def test_build_kronos_sampler_real_constructs_when_bundle_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When deps + bundle are (stubbed) ready, the factory returns a real sampler.
+
+    No weights are loaded here — construction is lazy; loading happens on first
+    sample. This only checks the factory wiring, offline.
+    """
+    import quantile_ledger.kronos_quantile as kq
+
+    monkeypatch.setattr(kq, "require_kronos_runtime_deps", lambda: None)
+    monkeypatch.setattr(kq, "kronos_bundle_ready", lambda _paths: True)
+    paths = KronosLocalPaths.under(tmp_path)
+    sampler = kq.build_kronos_sampler("real", paths=paths, lookback=400)
+    assert isinstance(sampler, RealKronosSampler)
+    assert sampler.allow_hub_download is False

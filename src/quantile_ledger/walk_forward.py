@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
+from quantile_ledger.artifacts import register_artifact, write_json_artifact
 from quantile_ledger.bars import (
     DAILY_GATE_HORIZONS,
     CloseSeries,
@@ -30,7 +32,10 @@ from quantile_ledger.forecast_store import (
     upsert_experiment,
 )
 from quantile_ledger.kronos_quantile import (
-    FakeKronosSampler,
+    KRONOS_BACKEND_FAKE,
+    KronosLocalPaths,
+    KronosSampler,
+    build_kronos_sampler,
     closes_to_ohlc_bars,
     issue_k0_forecast,
 )
@@ -108,6 +113,84 @@ def _settle_return(
     return outcome_price, actual_return, outcome_bar_at
 
 
+def _fit_once_challenger(
+    eid: str,
+    *,
+    series: CloseSeries,
+    indices: list[int],
+    bar_horizon: int,
+    lookback: int,
+    train_epochs: int,
+    seed: int,
+    min_model_samples: int,
+) -> tuple[Any | None, str | None]:
+    """Train M0/T0 once on the first issuance window that has enough samples.
+
+    Returns ``(model, training_cutoff)`` where ``training_cutoff`` is the bar-end
+    timestamp of that first eligible issuance. Returns ``(None, None)`` if no
+    window had enough samples (caller raises). PIT holds because the cutoff is
+    the first issuance's own timestamp, which precedes every later issuance.
+    """
+    for issue_idx in indices:
+        closes_known = series.closes[: issue_idx + 1]
+        cutoff = series.bar_ends[issue_idx]
+        model: Any
+        try:
+            if eid == "M0":
+                model, _ = train_m0_model(
+                    closes_known,
+                    bar_horizon=bar_horizon,
+                    lookback=lookback,
+                    epochs=train_epochs,
+                    seed=seed,
+                    min_samples=min_model_samples,
+                )
+            else:  # T0
+                model, _ = train_t0_model(
+                    closes_known,
+                    bar_horizon=bar_horizon,
+                    lookback=lookback,
+                    epochs=train_epochs,
+                    seed=seed,
+                    min_samples=min_model_samples,
+                )
+        except InsufficientDataError:
+            continue
+        return model, cutoff
+    return None, None
+
+
+def _persist_fit_once_artifact(
+    conn: Any,
+    *,
+    model: Any,
+    experiment_id: str,
+    model_dir: Path,
+) -> None:
+    """Write the fit_once model weights locally and register the artifact.
+
+    Uses relative paths only (no private absolute paths in the DB), mirroring
+    the demo's weight-persistence approach.
+    """
+    kind = f"{experiment_id.lower()}_weights"
+    artifact_id, digest, rel = write_json_artifact(
+        artifacts_dir=model_dir,
+        kind=kind,
+        payload=model.to_dict(),
+        filename_stem=f"{experiment_id.lower()}-fit-once",
+    )
+    register_artifact(
+        conn,
+        artifact_id=artifact_id,
+        digest=digest,
+        kind=kind,
+        relative_path=str(rel),
+        experiment_id=experiment_id,
+        model_version_id=None,
+        metadata={"training_mode": "fit_once"},
+    )
+
+
 def run_bars_walk_forward(
     conn: Any,
     *,
@@ -123,13 +206,43 @@ def run_bars_walk_forward(
     min_b1_samples: int = 30,
     min_model_samples: int = 40,
     exclude_synthetic: bool = True,
+    kronos_backend: str = KRONOS_BACKEND_FAKE,
+    kronos_paths: KronosLocalPaths | None = None,
+    training_mode: Literal["per_issuance", "fit_once"] = "per_issuance",
+    model_dir: Path | None = None,
 ) -> WalkForwardResult:
     """
     Issue B1 + one challenger on completed bars and settle from later bars.
 
     When exclude_synthetic=True (gate path), refuse if the PIT series mixes or
     is entirely synthetic.
+
+    ``kronos_backend`` selects the K0 sampler ("fake" default, offline; "real"
+    requires the optional [ml] extra and a fetched local bundle). It is only
+    consulted when the challenger is K0. ``kronos_paths`` supplies the local
+    weight-cache location for the real backend.
+
+    ``training_mode`` controls how M0/T0 are fit (K0 does not train):
+
+    - ``per_issuance`` (default): retrain from scratch on the expanding window
+      before every issuance. Cheap for the local stand-in models; preserves the
+      original behavior.
+    - ``fit_once``: fit a single model on the window up to the first eligible
+      issuance, persist it (when ``model_dir`` is given), and reuse it for every
+      later issuance. This is the seam real neural models (e.g. cluster-trained
+      Mamba/TFT) plug into. It is point-in-time safe because the single
+      ``training_cutoff`` equals the first issuance timestamp and therefore
+      precedes every later ``issued_at``.
+
+    ``model_dir`` is the local directory for persisted fit_once weight
+    artifacts; when omitted, the fitted model is reused in-memory without being
+    written to disk.
     """
+    if training_mode not in ("per_issuance", "fit_once"):
+        msg = (
+            f"training_mode must be 'per_issuance' or 'fit_once', got {training_mode!r}"
+        )
+        raise MalformedInputError(msg)
     iv = normalize_interval(interval)
     if iv == "1d" and horizon_hours not in DAILY_GATE_HORIZONS:
         msg = (
@@ -174,6 +287,26 @@ def run_bars_walk_forward(
         max_issues=max_issues,
     )
 
+    # Build the K0 sampler once (real backend loads weights lazily/at most once).
+    kronos_sampler: KronosSampler | None = None
+    if eid == "K0":
+        backend = kronos_backend.strip().lower()
+        if backend != KRONOS_BACKEND_FAKE and kronos_paths is None:
+            msg = (
+                f"K0 backend {kronos_backend!r} requires kronos_paths "
+                "(local weight-cache location); none was provided"
+            )
+            raise MalformedInputError(msg)
+        # Fake sampler ignores paths; real needs a cache location from the caller.
+        resolved_paths = kronos_paths or KronosLocalPaths(
+            weights_dir=Path(), source_dir=Path()
+        )
+        kronos_sampler = build_kronos_sampler(
+            backend,
+            paths=resolved_paths,
+            lookback=lookback,
+        )
+
     run_id = open_run(
         conn,
         run_type="walk_forward",
@@ -181,6 +314,36 @@ def run_bars_walk_forward(
     )
     upsert_experiment(conn, B1)
     upsert_experiment(conn, get_experiment(eid))
+
+    # fit_once: pre-train M0/T0 a single time on the window up to the first
+    # eligible issuance. The resulting (model, training_cutoff) is reused for
+    # every issuance; training_cutoff <= every later issued_at keeps it PIT-safe.
+    fitted_model: Any | None = None
+    fit_once_cutoff: str | None = None
+    if training_mode == "fit_once" and eid in ("M0", "T0"):
+        fitted_model, fit_once_cutoff = _fit_once_challenger(
+            eid,
+            series=series,
+            indices=indices,
+            bar_horizon=bar_horizon,
+            lookback=lookback,
+            train_epochs=train_epochs,
+            seed=seed,
+            min_model_samples=min_model_samples,
+        )
+        if fitted_model is None or fit_once_cutoff is None:
+            msg = (
+                f"fit_once could not train {eid}: no issuance window had "
+                f">= {min_model_samples} samples"
+            )
+            raise InsufficientDataError(msg)
+        if model_dir is not None:
+            _persist_fit_once_artifact(
+                conn,
+                model=fitted_model,
+                experiment_id=eid,
+                model_dir=model_dir,
+            )
 
     issued = 0
     settled = 0
@@ -217,14 +380,21 @@ def run_bars_walk_forward(
                     random_seed=seed,
                 )
                 if eid == "M0":
-                    m0_model, _ = train_m0_model(
-                        closes_known,
-                        bar_horizon=bar_horizon,
-                        lookback=lookback,
-                        epochs=train_epochs,
-                        seed=seed,
-                        min_samples=min_model_samples,
-                    )
+                    m0_model: Any
+                    if training_mode == "fit_once":
+                        m0_model = fitted_model
+                        m0_cutoff = fit_once_cutoff
+                    else:
+                        m0_model, _ = train_m0_model(
+                            closes_known,
+                            bar_horizon=bar_horizon,
+                            lookback=lookback,
+                            epochs=train_epochs,
+                            seed=seed,
+                            min_samples=min_model_samples,
+                        )
+                        m0_cutoff = training_cutoff
+                    assert m0_cutoff is not None and m0_cutoff <= issued_at
                     ch = issue_m0_forecast(
                         m0_model,
                         ticker=series.ticker,
@@ -234,20 +404,27 @@ def run_bars_walk_forward(
                         spot_at_issue=spot,
                         horizon_hours=horizon_hours,
                         recent_one_step_log_returns=rets,
-                        training_cutoff=training_cutoff,
+                        training_cutoff=m0_cutoff,
                         data_as_of=data_as_of,
                         is_synthetic=series.is_synthetic,
                         run_id=run_id,
                     )
                 elif eid == "T0":
-                    t0_model, _ = train_t0_model(
-                        closes_known,
-                        bar_horizon=bar_horizon,
-                        lookback=lookback,
-                        epochs=train_epochs,
-                        seed=seed,
-                        min_samples=min_model_samples,
-                    )
+                    t0_model: Any
+                    if training_mode == "fit_once":
+                        t0_model = fitted_model
+                        t0_cutoff = fit_once_cutoff
+                    else:
+                        t0_model, _ = train_t0_model(
+                            closes_known,
+                            bar_horizon=bar_horizon,
+                            lookback=lookback,
+                            epochs=train_epochs,
+                            seed=seed,
+                            min_samples=min_model_samples,
+                        )
+                        t0_cutoff = training_cutoff
+                    assert t0_cutoff is not None and t0_cutoff <= issued_at
                     ch = issue_t0_forecast(
                         t0_model,
                         ticker=series.ticker,
@@ -257,19 +434,19 @@ def run_bars_walk_forward(
                         spot_at_issue=spot,
                         horizon_hours=horizon_hours,
                         recent_one_step_log_returns=rets,
-                        training_cutoff=training_cutoff,
+                        training_cutoff=t0_cutoff,
                         data_as_of=data_as_of,
                         is_synthetic=series.is_synthetic,
                         run_id=run_id,
                     )
                 else:
-                    sampler = FakeKronosSampler(lookback=lookback)
+                    assert kronos_sampler is not None  # built above for K0
                     ohlc = closes_to_ohlc_bars(closes_known)
                     future_bar_ends = series.bar_ends[
                         issue_idx + 1 : issue_idx + bar_horizon + 1
                     ]
                     ch = issue_k0_forecast(
-                        sampler,
+                        kronos_sampler,
                         bars=ohlc,
                         bar_ends=bar_ends_known,
                         future_bar_ends=future_bar_ends,

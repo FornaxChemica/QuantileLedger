@@ -125,6 +125,42 @@ uv run ql experiment walk-forward --ticker SPY --experiment M0 --horizon-hours 2
 Daily bars support gate horizons **24h** and **72h** only (1 / 3 trading days).
 Synthetic demo rows are **excluded** from the evidence gate.
 
+### Challenger backend and training mode
+
+Walk-forward exposes two knobs on challenger issuance:
+
+- `--backend fake|real` (K0 only): `fake` (default) is the offline, deterministic
+  sampler. `real` uses the official public MIT Kronos weights from the local
+  `.ql/` cache — run `uv sync --extra ml` and `ql experiment fetch-k0` once
+  first. Real Kronos runs locally on CPU; no API key, nothing leaves the machine.
+- `--training-mode per_issuance|fit_once` (M0/T0): `per_issuance` (default)
+  retrains the model on the expanding window before every issuance. `fit_once`
+  trains a single model on the window up to the first issuance and reuses it for
+  every later issuance (point-in-time safe: the one training cutoff precedes all
+  issuances). `fit_once` is the mode heavy neural models require, since
+  per-issuance retraining is only cheap for the local stand-in models.
+
+Example — real Kronos, trained-once-equivalent (K0 does not train), local only:
+
+```bash
+uv sync --extra ml
+uv run ql experiment fetch-k0        # one-time public weights into .ql/ (no key)
+uv run ql experiment walk-forward --ticker SPY --experiment K0 \
+  --horizon-hours 24 --backend real
+```
+
+Example — T0 with a single training pass:
+
+```bash
+uv run ql experiment walk-forward --ticker SPY --experiment T0 \
+  --horizon-hours 24 --training-mode fit_once
+```
+
+> Real Mamba (`mamba-ssm`, CUDA) and real TFT (`pytorch-forecasting`) are a
+> later phase and need a CUDA GPU; `fit_once` is the seam they will plug into.
+> Weights would be trained on the GPU and brought back locally for evaluation —
+> the SQLite ledger, reports, and all results stay on this machine.
+
 Paper books for economic-value delta (challenger vs B1 control):
 
 ```bash

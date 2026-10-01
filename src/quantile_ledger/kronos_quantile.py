@@ -611,6 +611,57 @@ class _RNG:
         return math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
 
 
+KRONOS_BACKEND_FAKE = "fake"
+KRONOS_BACKEND_REAL = "real"
+KRONOS_BACKENDS = (KRONOS_BACKEND_FAKE, KRONOS_BACKEND_REAL)
+
+
+def build_kronos_sampler(
+    backend: str,
+    *,
+    paths: KronosLocalPaths,
+    lookback: int,
+    model_id: str = DEFAULT_MODEL_ID,
+    tokenizer_id: str = DEFAULT_TOKENIZER_ID,
+    allow_hub_download: bool = False,
+    device: str | None = None,
+) -> KronosSampler:
+    """Select the K0 sampler backend without changing the issuance core.
+
+    - ``fake``: deterministic offline sampler (no ML deps, no network).
+    - ``real``: official Kronos weights from the local ``.ql`` cache. Requires
+      the optional ``[ml]`` extra and a fetched bundle; raises
+      :class:`ModelUnavailableError` with actionable, path-free hints otherwise.
+
+    ``allow_hub_download`` defaults to False so this never triggers a network
+    download implicitly; use ``ql experiment fetch-k0`` to populate the cache
+    first (keeping downloads an explicit, user-initiated step).
+    """
+    normalized = backend.strip().lower()
+    if normalized == KRONOS_BACKEND_FAKE:
+        return FakeKronosSampler(lookback=lookback)
+    if normalized == KRONOS_BACKEND_REAL:
+        # Hard-gate on optional runtime deps first (clear install hint).
+        require_kronos_runtime_deps()
+        if not allow_hub_download and not kronos_bundle_ready(paths):
+            msg = (
+                "real Kronos backend selected but local weights are missing. "
+                "Run: ql experiment fetch-k0 (public MIT weights, no API key), "
+                "then retry. Demo/tests can use --backend fake offline."
+            )
+            raise ModelUnavailableError(msg)
+        return RealKronosSampler(
+            paths=paths,
+            model_id=model_id,
+            tokenizer_id=tokenizer_id,
+            lookback=lookback,
+            allow_hub_download=allow_hub_download,
+            device=device,
+        )
+    msg = f"unknown Kronos backend {backend!r}; expected one of {KRONOS_BACKENDS}"
+    raise ModelUnavailableError(msg)
+
+
 def issue_k0_forecast(
     sampler: KronosSampler,
     *,

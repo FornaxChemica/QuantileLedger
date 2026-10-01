@@ -34,11 +34,11 @@ sample size `N`.
 | Forward paper P&L accumulation | Done (synthetic demo + bars gate books) |
 | News / FinBERT controlled ablations | **Done** (Phase F infra + Phase G T1/T2/M1/N0 ladder) |
 | Isotonic PIT recalibration + vol regimes | **Done** (Phase H: M0c/T0c/K0c, val/eval split) |
-| Ensemble E0 | **Blocked** (M0 skill vs B1 ≤ 0 at N=40) |
-| Options paper trading | **Blocked** (M0 `equity_delta_mid` ≤ 0 at N=40) |
-| Streamlit dashboard / nightly | Not started |
+| Ensemble E0 | **Blocked** (M0 + T0 skill vs B1 ≤ 0 at N=40) |
+| Options paper trading | **Blocked** (M0 + T0 `equity_delta_mid` ≤ 0 at N=40) |
+| Local dashboard / nightly | Not started (prefer **local React/Vue**, not Streamlit) |
 
-### Evidence packet (2026-09-21) — human review
+### Evidence packet (2026-09-21) — M0 human review
 
 Local DB: `.ql-evidence/` (gitignored). Report copy:
 `.ql-evidence/reports/gate_M0_SPY_24h_2026-09-21.txt`.
@@ -52,8 +52,23 @@ Local DB: `.ql-evidence/` (gitignored). Report copy:
   rejected SPY notional). Challenger vs B1 control books + last-fill marks.
 - **Gate:** `fail` · `paired_n=40` · `skill_vs_B1=-0.311` · coverage=0.675 ·
   mean_width=0.039 · `equity_delta_mid=-3657.12` (fills ch=4 / b1=7).
-- **Unlock:** Phase **I** and **J2** stay blocked. Negative result with adequate
-  N is valid. Optional later evidence: T0, 72h, more tickers — not E0/options.
+- **Unlock:** Phase **I** and **J2** stay blocked.
+
+### Evidence packet (2026-09-22) — T0 human review
+
+Local DB: `.ql-evidence-t0/` (gitignored; fresh DB to avoid B1 unique collision
+with the M0 packet). Report:
+`.ql-evidence-t0/reports/gate_T0_SPY_24h_2026-09-22.txt`.
+
+- **Bars:** same Yahoo imports as M0 packet.
+- **Walk-forward:** T0 + B1 on SPY, horizon 24h, `--max-issues 40`,
+  `issued=80` / `settled=80`, non-synthetic.
+- **Gate:** `fail` · `paired_n=40` · `skill_vs_B1=-0.311` · coverage=0.675 ·
+  mean_width=0.039 · `equity_delta_mid=-3657.12` (fills ch=4 / b1=7).
+- Metrics are nearly identical to the M0 packet — worth a later sanity check.
+- **Unlock:** Phase **I** and **J2** remain blocked. Negative result with
+  adequate N is valid. Optional later: 72h / other tickers — still not
+  E0/options until a positive gate.
 
 ## Research / trading order (authoritative)
 
@@ -165,21 +180,33 @@ terciles with N + coverage + width.
 - [x] `ql experiment walk-forward` on stored `1d` bars (horizons 24h / 72h)
 - [x] B1 control paper policy (`ql paper policy-init --b1-control`) + `ql paper gate-run`
 - [x] `ql report gate` (excludes synthetic; pass/fail/inconclusive; human unlock checklist)
+- [x] Real Kronos backend selectable: `walk-forward --backend real` (local `.ql/`
+  weights via `[ml]` + `fetch-k0`; `fake` stays the offline default)
+- [x] `fit_once` training mode (`walk-forward --training-mode fit_once`): train
+  M0/T0 once on the first-issuance window and reuse (PIT-safe single cutoff);
+  seam for later cluster-trained Mamba/TFT
 - [ ] Nightly scheduler / `jobs.py` (still Milestone 9)
 
 Gate does **not** auto-unlock Phase I or J2.
+
+> **Evidence packets are stale after the interval-collapse fix.** The M0/T0
+> packets below (2026-09-21 / 09-22) were produced by the pre-fix models whose
+> P10–P90 intervals had collapsed to ~zero width. Those numbers must **not** be
+> reused as evidence. Regenerate M0/T0 packets with the fixed models before any
+> Phase I / J2 unlock decision; keep them clearly distinct from the stale runs.
 
 ## Phase I — Ensemble E0
 
 - [ ] Only after validation gates on challengers vs B1 (`ql report gate` non-inconclusive + positive skill; human review)
 - **2026-09-21:** M0 SPY 24h gate `fail` (skill ≤ 0, N=40) — **not unlocked**
+- **2026-09-22:** T0 SPY 24h gate `fail` (skill ≤ 0, N=40) — **not unlocked**
 
 ## Phase J2 — Options paper (blocked)
 
 Blocked until J1 forward book shows **economic value** evidence
 (after costs, vs B1, with adequate N) via `ql report gate` paper delta.
-**2026-09-21:** M0 SPY 24h `equity_delta_mid` ≤ 0 at N=40 — **not unlocked**.
-Then:
+**2026-09-21 / 09-22:** M0 and T0 SPY 24h `equity_delta_mid` ≤ 0 at N=40 —
+**not unlocked**. Then:
 
 - [ ] Long calls / long puts only (unless scope changes again)
 - [ ] Option quote quality, spread caps, expiration backfill at historical spot
@@ -187,5 +214,10 @@ Then:
 
 ## Phase K — Dashboard / nightly (later)
 
-- [ ] Local Streamlit / reports
+Direction (2026-09-22): **local React or Vue SPA** (or static `index.html` + JS)
+reading the local SQLite / report artifacts — **not Streamlit**. Still local-only
+(no hosted dashboard, no cloud deploy, no telemetry).
+
+- [ ] Local frontend (React/Vue) over local API or file-backed reports
 - [ ] launchd / local scheduler (no hosted CI)
+- [ ] Nightly walk-forward job wiring (`jobs.py`; Milestone 9)
